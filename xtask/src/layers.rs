@@ -68,6 +68,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("photocraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    // Local Gemini retouch service. Not part of the editor binary.
+    ("gemini-retouch", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 

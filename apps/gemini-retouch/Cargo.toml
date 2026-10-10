@@ -1,0 +1,22 @@
+[package]
+name = "photocraft-gemini-retouch"
+description = "Local backend that retouches a square PhotoCraft selection with Gemini Nano Banana 2.1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "photocraft_gemini_retouch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "photocraft-gemini-retouch"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+base64 = "0.22"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

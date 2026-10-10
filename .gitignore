@@ -1,4 +1,5 @@
 *~
+.env
 plan/
 /target
 target/

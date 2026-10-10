@@ -1014,6 +1014,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::eraser_cmds::specs());
     v.extend(crate::preset_import_cmds::specs());
     v.extend(crate::retouch_cmds::specs());
+    v.extend(crate::gemini_cmds::specs());
     v.extend(crate::image_cmds::specs());
     v.extend(crate::selection_cmds::specs());
     v.extend(crate::magnetic_cmds::specs());

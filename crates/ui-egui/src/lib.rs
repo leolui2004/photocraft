@@ -653,10 +653,18 @@ impl PhotocraftApp {
         self.perf.last_command = id.to_string();
         self.perf.command_ms = gpu_canvas::now_ms() - t0;
         match &r {
-            Ok(_) => {
+            Ok(v) => {
                 self.sync_views();
                 if self.ui.status_error {
                     self.ui.status.clear();
+                    self.ui.status_error = false;
+                }
+                // The prompt is typed on the retouch backend. Say where, in case the browser did not open.
+                if id == "edit.generativeRetouch"
+                    && v.get("awaitingPrompt").and_then(Value::as_bool) == Some(true)
+                    && let Some(page) = v.get("page").and_then(Value::as_str)
+                {
+                    self.ui.status = format!("Enter the retouch prompt at {page}, then Edit › Place Generative Result");
                     self.ui.status_error = false;
                 }
             }
