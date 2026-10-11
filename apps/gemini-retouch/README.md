@@ -1,5 +1,7 @@
 # PhotoCraft retouch
 
+Guides with screenshots: [繁體中文](../../docs/generative-retouch/README.md) · [English](../../docs/generative-retouch/README.en.md) · [日本語](../../docs/generative-retouch/README.ja.md).
+
 A small program that runs beside PhotoCraft. It holds the Gemini API key and the page where the prompt and aspect ratio are chosen. PhotoCraft only sends the selection and, later, places the returned image on a new layer.
 
 ## Using it

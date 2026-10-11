@@ -32,6 +32,12 @@
   <a href="https://getartcraft.com/apps">All Crafting Apps</a>
 </p>
 
+<p align="center">
+  <a href="docs/generative-retouch/README.md"><b>生成式潤飾</b></a> ·
+  <a href="docs/generative-retouch/README.en.md">Generative Retouch</a> ·
+  <a href="docs/generative-retouch/README.ja.md">生成レタッチ</a>
+</p>
+
 <br>
 
 <p align="center">
