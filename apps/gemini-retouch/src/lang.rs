@@ -28,7 +28,7 @@ pub struct Options {
     /// Open the prompt page in a browser once the server is listening.
     pub open_browser: bool,
     /// Open that page after the first selection is stored, instead of at startup.
-    /// PhotoCraft passes this so the page's first view already shows the square.
+    /// PhotoCraft passes this so the page's first view already shows the selection.
     pub open_on_selection: bool,
 }
 
@@ -147,9 +147,11 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selec
 
     pub fn banner_howto(self) -> &'static str {
         match self {
-            Lang::En => "Square selection in PhotoCraft, then Edit › Generative Retouch. Enter the prompt on this page.",
-            Lang::Ja => "PhotoCraft で正方形を選択し、編集 › 生成レタッチ を選んでください。プロンプトはこのページに入力します。",
-            Lang::ZhHant => "請在 PhotoCraft 中框選正方形，然後選擇「編輯 › 生成式潤飾」。請在此頁面輸入提示。",
+            Lang::En => "Select a Gemini ratio (1:1, 16:9, …) in PhotoCraft, then Edit › Generative Retouch. Pick the ratio and enter the prompt on this page.",
+            Lang::Ja => {
+                "PhotoCraft で Gemini の縦横比（1:1、16:9 など）を選択し、編集 › 生成レタッチ を選んでください。縦横比とプロンプトはこのページで指定します。"
+            }
+            Lang::ZhHant => "請在 PhotoCraft 中選取 Gemini 長寬比（1:1、16:9 等），然後選擇「編輯 › 生成式潤飾」。請在此頁面選擇長寬比並輸入提示。",
         }
     }
 
@@ -305,7 +307,7 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selec
             Lang::En => PageText {
                 html_lang: "en",
                 title: "PhotoCraft retouch",
-                intro: "Select a square in PhotoCraft and choose Edit › Generative Retouch. Then describe the change and send it. When this page says the image is ready, choose Edit › Place Generative Result.",
+                intro: "In PhotoCraft, select a region in one of Gemini's ratios (a square, 16:9, 4:3, and the others in the list) and choose Edit › Generative Retouch. Pick the ratio, describe the change, and send it. When the image looks right, press Use this. Regenerate tries again.",
                 key_before: "Paste the API key from ",
                 key_link: "Google AI Studio",
                 key_after: ". It stays on this computer. PhotoCraft never sees it.",
@@ -315,47 +317,69 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selec
                 prompt_hint: "remove stray hair",
                 hair: "Remove stray hair",
                 skin: "Retouch skin",
+                passerby: "Remove passerby",
+                ratio: "Aspect ratio",
                 send: "Send",
+                use_this: "Use this",
+                again: "Regenerate",
+                show_original: "Show original",
+                show_result: "Show result",
+                adding: "Adding it to PhotoCraft…",
+                added: "Added to PhotoCraft.",
+                confirm_failed: "Could not confirm the image.",
+                menu_fallback: "Confirmed. If it does not appear in PhotoCraft, choose Edit › Place Generative Result.",
+                result_alt: "Generated image",
                 saving: "Saving the key…",
                 save_failed: "Could not save the key.",
                 saved: "API key saved on this computer.",
                 unreachable: "Could not reach the backend.",
-                alt: "Selected square",
+                alt: "Selected region",
                 sending: "Sending to Gemini…",
-                ready: "Ready. In PhotoCraft, choose Edit › Place Generative Result.",
+                ready: "Look at the result. Use this image, or regenerate.",
                 failed: "The retouch failed.",
-                received: "Selection received ({w}×{h}, output {size}). Enter a prompt and send.",
+                received: "Selection received ({w}×{h}, {ratio}, output {size}). Enter a prompt and send.",
                 need_key: "Paste your Gemini API key above. It is saved on this computer.",
             },
             Lang::Ja => PageText {
                 html_lang: "ja",
                 title: "PhotoCraft レタッチ",
-                intro: "PhotoCraft で正方形を選択し、編集 › 生成レタッチ を選んでください。変更内容を書いて送信します。このページに準備ができた表示が出たら、編集 › 生成結果を配置 を選んでください。",
+                intro: "PhotoCraft で Gemini の縦横比（正方形、16:9、4:3 など）に合う範囲を選択し、編集 › 生成レタッチ を選んでください。縦横比を選び、変更内容を書いて送信します。よければ「これを使う」を押し、やり直すときは「再生成」を押します。",
                 key_before: "",
                 key_link: "Google AI Studio",
                 key_after: " の API キーを貼り付けてください。キーはこのパソコンに保存され、PhotoCraft には渡りません。",
                 api_key: "API キー",
                 save_key: "キーを保存",
                 empty: "まだ選択範囲がありません。",
-                prompt_hint: "余計な髪を消す",
-                hair: "余計な髪を消す",
+                prompt_hint: "ほつれ毛を消す",
+                hair: "ほつれ毛を消す",
                 skin: "肌をレタッチ",
+                passerby: "通行人を消す",
+                ratio: "縦横比",
                 send: "送信",
+                use_this: "これを使う",
+                again: "再生成",
+                show_original: "元の画像を表示",
+                show_result: "生成結果を表示",
+                adding: "PhotoCraft に追加しています…",
+                added: "PhotoCraft に追加しました。",
+                confirm_failed: "画像を確定できませんでした。",
+                menu_fallback: "確定しました。PhotoCraft に出ない場合は、編集 › 生成結果を配置 を選んでください。",
+                result_alt: "生成された画像",
                 saving: "キーを保存しています…",
                 save_failed: "キーを保存できませんでした。",
                 saved: "API キーをこのパソコンに保存しました。",
                 unreachable: "バックエンドに接続できませんでした。",
-                alt: "選択した正方形",
+                alt: "選択した範囲",
                 sending: "Gemini に送信しています…",
-                ready: "準備ができました。PhotoCraft の編集 › 生成結果を配置 を選んでください。",
+                ready: "結果を確認してください。この画像を使うか、再生成してください。",
                 failed: "レタッチに失敗しました。",
-                received: "選択範囲を受け取りました（{w}×{h}、出力 {size}）。プロンプトを入力して送信してください。",
+                received: "選択範囲を受け取りました（{w}×{h}、{ratio}、出力 {size}）。プロンプトを入力して送信してください。",
                 need_key: "上の欄に Gemini API キーを貼り付けてください。このパソコンに保存されます。",
             },
             Lang::ZhHant => PageText {
                 html_lang: "zh-Hant",
                 title: "PhotoCraft 潤飾",
-                intro: "請在 PhotoCraft 中框選正方形，然後選擇「編輯 › 生成式潤飾」。描述要做的修改並傳送。此頁面顯示影像已就緒時，請選擇「編輯 › 置入生成結果」。",
+                intro: "請在 PhotoCraft 中框選符合 Gemini 長寬比的範圍（正方形、16:9、4:3 等），然後選擇「編輯 › 生成式潤飾」。選擇長寬比、描述修改並傳送。影像正確時請按「使用這張」。「重新生成」會再試一次。",
                 key_before: "請貼上 ",
                 key_link: "Google AI Studio",
                 key_after: " 的 API 金鑰。金鑰只留在這台電腦上，PhotoCraft 不會看到。",
@@ -365,16 +389,27 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selec
                 prompt_hint: "去除多餘的頭髮",
                 hair: "去除多餘的頭髮",
                 skin: "潤飾皮膚",
+                passerby: "去除路人",
+                ratio: "長寬比",
                 send: "傳送",
+                use_this: "使用這張",
+                again: "重新生成",
+                show_original: "顯示原圖",
+                show_result: "顯示結果",
+                adding: "正在加入 PhotoCraft…",
+                added: "已加入 PhotoCraft。",
+                confirm_failed: "無法確認影像。",
+                menu_fallback: "已確認。若 PhotoCraft 沒有出現影像，請選擇「編輯 › 置入生成結果」。",
+                result_alt: "生成的影像",
                 saving: "正在儲存金鑰…",
                 save_failed: "無法儲存金鑰。",
                 saved: "已將 API 金鑰儲存在這台電腦上。",
                 unreachable: "無法連線到後端。",
-                alt: "選取的正方形",
+                alt: "選取的範圍",
                 sending: "正在傳送到 Gemini…",
-                ready: "已就緒。請在 PhotoCraft 選擇「編輯 › 置入生成結果」。",
+                ready: "請查看結果。使用這張影像，或重新生成。",
                 failed: "潤飾失敗。",
-                received: "已收到選取範圍（{w}×{h}，輸出 {size}）。請輸入提示並傳送。",
+                received: "已收到選取範圍（{w}×{h}，{ratio}，輸出 {size}）。請輸入提示並傳送。",
                 need_key: "請在上方貼上 Gemini API 金鑰。金鑰會儲存在這台電腦上。",
             },
         }
@@ -395,7 +430,18 @@ pub struct PageText {
     pub prompt_hint: &'static str,
     pub hair: &'static str,
     pub skin: &'static str,
+    pub passerby: &'static str,
+    pub ratio: &'static str,
     pub send: &'static str,
+    pub use_this: &'static str,
+    pub again: &'static str,
+    pub show_original: &'static str,
+    pub show_result: &'static str,
+    pub adding: &'static str,
+    pub added: &'static str,
+    pub confirm_failed: &'static str,
+    pub menu_fallback: &'static str,
+    pub result_alt: &'static str,
     pub saving: &'static str,
     pub save_failed: &'static str,
     pub saved: &'static str,
@@ -460,15 +506,25 @@ mod tests {
         assert_eq!(Lang::Ja.page_code(), "ja");
         assert!(Lang::Ja.page().empty.contains("選択範囲"));
         assert!(Lang::Ja.page().received.contains("{w}"));
+        assert!(Lang::Ja.page().received.contains("{ratio}"));
+        assert_eq!(Lang::Ja.page().ratio, "縦横比");
+        assert_eq!(Lang::ZhHant.page().ratio, "長寬比");
         assert!(Lang::ZhHant.page().title.contains("潤飾"));
         assert!(!Lang::Ja.page().intro.contains("Select a square"));
         assert!(Lang::Ja.page().intro.contains("生成レタッチ"));
-        assert!(Lang::Ja.page().ready.contains("生成結果を配置"));
+        assert!(Lang::Ja.page().again.contains("再生成"));
+        assert!(Lang::Ja.page().menu_fallback.contains("生成結果を配置"));
+        assert_eq!(Lang::Ja.page().hair, "ほつれ毛を消す");
+        assert_eq!(Lang::Ja.page().passerby, "通行人を消す");
+        assert_eq!(Lang::En.page().passerby, "Remove passerby");
+        assert_eq!(Lang::ZhHant.page().passerby, "去除路人");
         assert!(Lang::Ja.banner_howto().contains("生成レタッチ"));
         assert!(Lang::ZhHant.page().intro.contains("生成式潤飾"));
-        assert!(Lang::ZhHant.page().ready.contains("置入生成結果"));
+        assert!(Lang::ZhHant.page().use_this.contains("使用這張"));
+        assert!(Lang::ZhHant.page().menu_fallback.contains("置入生成結果"));
         assert!(Lang::ZhHant.banner_howto().contains("生成式潤飾"));
         assert!(!Lang::Ja.page().intro.contains("Generative Retouch"));
         assert!(!Lang::ZhHant.page().ready.contains("Place Generative Result"));
+        assert!(!Lang::ZhHant.page().menu_fallback.contains("Place Generative Result"));
     }
 }

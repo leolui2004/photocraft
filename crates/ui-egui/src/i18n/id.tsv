@@ -2553,4 +2553,5 @@ cameraRaw	Blending	Pembauran
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PR, {commits} commit, +{added} / −{deleted} baris (Δ {delta}), +{binAdded} / −{binDeleted} berkas biner, {first} – {last}
 	Generative Retouch	Retouch Generatif
 	Place Generative Result	Tempatkan Hasil Generatif
-	Enter the retouch prompt at {page}, then {menu} › {command}	Masukkan perintah retouch di {page}, lalu pilih {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Masukkan perintah retouch di {page}. Use this menambahkan gambar, Regenerate mencoba lagi.
+	Added the generative result.	Hasil generatif ditambahkan.

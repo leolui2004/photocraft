@@ -2566,4 +2566,5 @@ cameraRaw	Blending	Fusion
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login} : {prs} PR, {commits} commits, +{added} / −{deleted} lignes (Δ {delta}), +{binAdded} / −{binDeleted} fichiers binaires, {first} – {last}
 	Generative Retouch	Retouche générative
 	Place Generative Result	Placer le résultat génératif
-	Enter the retouch prompt at {page}, then {menu} › {command}	Saisissez l'instruction de retouche sur {page}, puis choisissez {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Saisissez l'instruction de retouche sur {page}. Appuyez sur Use this pour ajouter l'image, ou sur Regenerate pour réessayer.
+	Added the generative result.	Résultat génératif ajouté.

@@ -2206,4 +2206,5 @@ cameraRaw	Amount	Cantidad
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PR, {commits} commits, +{added} / −{deleted} líneas (Δ {delta}), +{binAdded} / −{binDeleted} archivos binarios, {first} – {last}
 	Generative Retouch	Retoque generativo
 	Place Generative Result	Colocar resultado generativo
-	Enter the retouch prompt at {page}, then {menu} › {command}	Escriba la instrucción de retoque en {page} y luego elija {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Escriba la instrucción de retoque en {page}. Pulse Use this para añadir la imagen, o Regenerate para intentarlo de nuevo.
+	Added the generative result.	Se añadió el resultado generativo.

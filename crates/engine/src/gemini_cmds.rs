@@ -1,10 +1,11 @@
-//! Generative retouch of a square selection.
+//! Generative retouch of a selection whose shape matches a Gemini aspect ratio.
 //!
-//! PhotoCraft crops the square and posts it to a separate local backend
-//! (`apps/gemini-retouch`). The prompt is typed on that backend's page, which calls
-//! Gemini Nano Banana 2.1. PhotoCraft then places the returned image on a new layer,
-//! scaled to the selection. Passing `prompt` does the round trip in one command so
-//! agents do not need the page.
+//! PhotoCraft crops that region and posts it to a separate local backend
+//! (`apps/gemini-retouch`). The prompt and the ratio are chosen on that backend's page,
+//! which calls Gemini Nano Banana 2.1. PhotoCraft then places the returned image on a new
+//! layer, scaled to the selection (or to the ratio chosen on the page, centered in the
+//! selection). Passing `prompt` does the round trip in one command so agents do not need
+//! the page.
 
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
@@ -19,43 +20,115 @@ use crate::{EngineError, Result, Session};
 const SEND: &str = "edit.generativeRetouch";
 const PLACE: &str = "edit.generativeRetouch.place";
 const DEFAULT_URL: &str = "http://127.0.0.1:8787";
-/// Largest square the backend will accept (Gemini's 4K 1:1 frame).
-const MAX_SIDE: u32 = 4096;
+/// Longest side Gemini Nano Banana 2.1 returns (4K at 1:8 or 8:1). Keep this, [`RATIOS`],
+/// and the one-pixel match rule in step with `apps/gemini-retouch/src/gemini.rs`.
+const MAX_OUTPUT_SIDE: u32 = 12288;
+
+/// `(label, width parts, 4K frame)` from the Nano Banana 2.1 table.
+#[derive(Clone, Copy)]
+struct GeminiRatio {
+    label: &'static str,
+    w: u32,
+    h: u32,
+    max_w: u32,
+    max_h: u32,
+}
+
+const RATIOS: &[GeminiRatio] = &[
+    GeminiRatio { label: "1:1", w: 1, h: 1, max_w: 4096, max_h: 4096 },
+    GeminiRatio { label: "1:4", w: 1, h: 4, max_w: 2048, max_h: 8192 },
+    GeminiRatio { label: "1:8", w: 1, h: 8, max_w: 1536, max_h: 12288 },
+    GeminiRatio { label: "2:3", w: 2, h: 3, max_w: 3392, max_h: 5056 },
+    GeminiRatio { label: "3:2", w: 3, h: 2, max_w: 5056, max_h: 3392 },
+    GeminiRatio { label: "3:4", w: 3, h: 4, max_w: 3584, max_h: 4800 },
+    GeminiRatio { label: "4:1", w: 4, h: 1, max_w: 8192, max_h: 2048 },
+    GeminiRatio { label: "4:3", w: 4, h: 3, max_w: 4800, max_h: 3584 },
+    GeminiRatio { label: "4:5", w: 4, h: 5, max_w: 3712, max_h: 4608 },
+    GeminiRatio { label: "5:4", w: 5, h: 4, max_w: 4608, max_h: 3712 },
+    GeminiRatio { label: "8:1", w: 8, h: 1, max_w: 12288, max_h: 1536 },
+    GeminiRatio { label: "9:16", w: 9, h: 16, max_w: 3072, max_h: 5504 },
+    GeminiRatio { label: "16:9", w: 16, h: 9, max_w: 5504, max_h: 3072 },
+    GeminiRatio { label: "21:9", w: 21, h: 9, max_w: 6336, max_h: 2688 },
+];
+
+fn ratio_list() -> String {
+    RATIOS.iter().map(|r| r.label).collect::<Vec<_>>().join(", ")
+}
+
+fn known_ratio(label: &str) -> bool {
+    RATIOS.iter().any(|r| r.label == label)
+}
+
+/// Closest Gemini ratio within one pixel. A tie keeps the earlier row, so a near-square stays 1:1.
+fn match_ratio(width: u32, height: u32) -> std::result::Result<GeminiRatio, String> {
+    if width == 0 || height == 0 {
+        return Err("the selection is empty".into());
+    }
+    let mut best: Option<(GeminiRatio, u64, u64)> = None;
+    for ratio in RATIOS {
+        let cross = u64::from(width).saturating_mul(u64::from(ratio.h)).abs_diff(u64::from(height).saturating_mul(u64::from(ratio.w)));
+        let den = u64::from(ratio.w.max(ratio.h));
+        if den == 0 || cross > den {
+            continue;
+        }
+        let replace = match best {
+            None => true,
+            Some((_, best_cross, best_den)) => cross.saturating_mul(best_den) < best_cross.saturating_mul(den),
+        };
+        if replace {
+            best = Some((*ratio, cross, den));
+        }
+    }
+    best.map(|(ratio, _, _)| ratio).ok_or_else(|| format!("the selection must match a Gemini aspect ratio ({}); it is {width}×{height}", ratio_list()))
+}
+
+fn cross(width: u32, height: u32, aw: u32, ah: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(ah)).abs_diff(u64::from(height).saturating_mul(u64::from(aw)))
+}
+
+/// Drop at most one pixel so the rectangle sits closer to `aw`:`ah`. The top-left corner stays.
+fn trim_to_ratio(width: u32, height: u32, aw: u32, ah: u32) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let mut best = (width, height);
+    let mut best_err = cross(width, height, aw, ah);
+    for (w, h) in [(width, height), (width.saturating_sub(1).max(1), height), (width, height.saturating_sub(1).max(1))] {
+        let err = cross(w, h, aw, ah);
+        if err < best_err {
+            best = (w, h);
+            best_err = err;
+        }
+    }
+    best
+}
 
 fn bad(msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: SEND.into(), msg: msg.into() }
 }
 
-fn square(doc: &Document) -> std::result::Result<Rect, String> {
+fn frame(doc: &Document) -> std::result::Result<Rect, String> {
     let Some(sel) = doc.selection.as_ref() else {
-        return Err("select a square region first".into());
+        return Err("select a region in a Gemini aspect ratio first".into());
     };
-    let mut b = sel.content_bounds();
+    let b = sel.content_bounds();
     if b.is_empty() {
         return Err("the selection is empty".into());
     }
-    // A 1:1 marquee is square in document space, but floor/ceil (or one pixel of anti-aliasing)
-    // can leave the mask one pixel off. Use the inscribed square so Generative Retouch stays enabled.
-    let (w, h) = (b.width(), b.height());
-    if w != h {
-        if w.abs_diff(h) != 1 {
-            return Err(format!("the selection must be square (it is {w}×{h})"));
-        }
-        let side = w.min(h);
-        b = Rect::from_xywh(b.x0, b.y0, side, side);
+    let ratio = match_ratio(b.width(), b.height())?;
+    let (width, height) = trim_to_ratio(b.width(), b.height(), ratio.w, ratio.h);
+    if width > ratio.max_w || height > ratio.max_h {
+        return Err(format!("the selection is {width}×{height}; the largest {} image Gemini can return is {}×{} (4K)", ratio.label, ratio.max_w, ratio.max_h));
     }
-    if !doc.bounds().contains_rect(&b) {
-        return Err("the square selection must lie entirely on the canvas".into());
+    let rect = Rect::from_xywh(b.x0, b.y0, width, height);
+    if !doc.bounds().contains_rect(&rect) {
+        return Err("the selection must lie entirely on the canvas".into());
     }
-    if b.width() > MAX_SIDE {
-        return Err(format!("the square is {} px; the largest 1:1 image Gemini can return is {MAX_SIDE} px", b.width()));
-    }
-    Ok(b)
+    Ok(rect)
 }
 
 fn enabled_send(s: &Session) -> std::result::Result<(), String> {
     let d = s.active().ok_or("no document open")?;
-    square(&d.doc).map(|_| ())
+    frame(&d.doc).map(|_| ())
 }
 
 fn enabled_place(s: &Session) -> std::result::Result<(), String> {
@@ -66,8 +139,12 @@ struct Opts {
     origin: Origin,
     prompt: Option<String>,
     open_page: bool,
+    /// Place the image the prompt page confirmed, not the latest generate.
+    accepted: bool,
     /// Prompt-page language (`ja`, `zh-Hant`). Omitted keeps the server's own page.
     lang: Option<String>,
+    /// Gemini output ratio. Omitted asks the backend to use the selection's own ratio.
+    aspect_ratio: Option<String>,
 }
 
 struct Origin {
@@ -101,20 +178,33 @@ fn opts(p: &Value) -> Result<Opts> {
     if p.get("lang").is_some_and(|v| !v.is_string()) {
         return Err(bad("`lang` must be a string"));
     }
+    if p.get("accepted").is_some_and(|v| !v.is_boolean()) {
+        return Err(bad("`accepted` must be a boolean"));
+    }
+    if p.get("aspectRatio").is_some_and(|v| !v.is_string()) {
+        return Err(bad("`aspectRatio` must be a string"));
+    }
     let url = p.get("url").and_then(Value::as_str).unwrap_or(DEFAULT_URL);
     let origin = parse_origin(url).map_err(bad)?;
     let prompt = p.get("prompt").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     if prompt.as_ref().is_some_and(|s| s.chars().count() > 4_000) {
         return Err(bad("the prompt is too long"));
     }
+    let aspect_ratio = p.get("aspectRatio").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(label) = &aspect_ratio
+        && !known_ratio(label)
+    {
+        return Err(bad(format!("aspect ratio must be one of {}", ratio_list())));
+    }
     let open_page = p.get("open").and_then(Value::as_bool).unwrap_or(true);
+    let accepted = p.get("accepted").and_then(Value::as_bool).unwrap_or(false);
     let lang = p.get("lang").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     if let Some(code) = &lang
         && (code.len() > 16 || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
     {
         return Err(bad("`lang` must be a language code such as ja or zh-Hant"));
     }
-    Ok(Opts { origin, prompt, open_page, lang })
+    Ok(Opts { origin, prompt, open_page, accepted, lang, aspect_ratio })
 }
 
 fn parse_origin(url: &str) -> std::result::Result<Origin, String> {
@@ -145,17 +235,18 @@ fn parse_origin(url: &str) -> std::result::Result<Origin, String> {
 fn send(s: &mut Session, p: &Value) -> Result<Value> {
     let opts = opts(p)?;
     let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
-    let rect = square(doc).map_err(EngineError::Other)?;
+    let rect = frame(doc).map_err(EngineError::Other)?;
     let png = selection_png(doc, rect)?;
     if let Some(prompt) = opts.prompt.clone() {
         let origin = opts.origin;
+        let aspect = opts.aspect_ratio.clone();
         return crate::jobs::edit_job(
             s,
             "Generative Retouch",
             move |doc, active, ctx| {
                 ctx.progress(0.05, "Sending the selection");
                 ctx.check()?;
-                let got = http::post_edit(&origin, &png, rect, &prompt)?;
+                let got = http::post_edit(&origin, &png, rect, &prompt, aspect.as_deref())?;
                 ctx.check()?;
                 ctx.progress(0.85, "Placing the layer");
                 let id = place_layer(doc, active, &got.png, got.x, got.y, got.width, got.height)?;
@@ -167,10 +258,12 @@ fn send(s: &mut Session, p: &Value) -> Result<Value> {
     http::post_selection(&opts.origin, &png, rect)?;
     let page = opts.origin.page_for(opts.lang.as_deref());
     let opened = if opts.open_page { open_page(&page) } else { false };
+    let matched = match_ratio(rect.width(), rect.height()).map(|ratio| ratio.label.to_string()).unwrap_or_default();
     Ok(json!({
         "awaitingPrompt": true,
         "page": page,
         "opened": opened,
+        "aspectRatio": matched,
         "x": rect.x0,
         "y": rect.y0,
         "width": rect.width(),
@@ -180,8 +273,19 @@ fn send(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn place(s: &mut Session, p: &Value) -> Result<Value> {
     let opts = opts(p)?;
-    let got = http::get_result(&opts.origin)?;
-    place_fetched(s, &got)
+    let got = if opts.accepted { http::get_accepted(&opts.origin)? } else { http::get_result(&opts.origin)? };
+    let placed = place_fetched(s, &got)?;
+    if opts.accepted {
+        let _ = http::ack_placed(&opts.origin);
+    }
+    Ok(placed)
+}
+
+/// The confirm counter on the retouch page (Use this). `0` when nothing has been confirmed.
+/// The desktop shell polls this and places with `accepted: true` when it increases.
+pub fn retouch_accept_seq(url: &str) -> std::result::Result<u64, String> {
+    let origin = parse_origin(url)?;
+    http::accept_seq(&origin).map_err(|e| e.to_string())
 }
 
 fn place_fetched(s: &mut Session, got: &Fetched) -> Result<Value> {
@@ -233,7 +337,7 @@ fn place_layer(doc: &mut Document, active: &mut Option<LayerId>, png: &[u8], x: 
     let img = photocraft_codecs::decode(png).map_err(|e| EngineError::Other(format!("the retouch image could not be read: {e}")))?;
     let sw = img.width();
     let sh = img.height();
-    if sw == 0 || sh == 0 || sw > MAX_SIDE || sh > MAX_SIDE {
+    if sw == 0 || sh == 0 || sw > MAX_OUTPUT_SIDE || sh > MAX_OUTPUT_SIDE {
         return Err(EngineError::Other(format!("the retouch image is {sw}×{sh}, which this command will not place")));
     }
     let flat = img.to_rgba_f32();
@@ -319,9 +423,7 @@ fn bilinear(src: &[[f32; 4]], sw: u32, sh: u32, x: f32, y: f32) -> [f32; 4] {
     let y1 = (y0 + 1).min(sh - 1);
     let tx = (x - x0 as f32).clamp(0.0, 1.0);
     let ty = (y - y0 as f32).clamp(0.0, 1.0);
-    let at = |xx: u32, yy: u32| -> [f32; 4] {
-        src.get(yy as usize * sw as usize + xx as usize).copied().unwrap_or([0.0; 4])
-    };
+    let at = |xx: u32, yy: u32| -> [f32; 4] { src.get(yy as usize * sw as usize + xx as usize).copied().unwrap_or([0.0; 4]) };
     let lerp = |a: [f32; 4], b: [f32; 4], t: f32| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
     lerp(lerp(at(x0, y0), at(x1, y0), tx), lerp(at(x0, y1), at(x1, y1), tx), ty).map(finite01)
 }
@@ -364,23 +466,45 @@ mod http {
     use photocraft_geom::Rect;
 
     pub fn post_selection(origin: &Origin, png: &[u8], rect: Rect) -> Result<()> {
-        let body = selection_json(png, rect, None);
+        let body = selection_json(png, rect, None, None);
         let resp = exchange(origin, "POST", "/selection", "application/json", body.as_bytes(), Duration::from_secs(15))?;
         expect_ok(&resp, "upload the selection")
     }
 
-    pub fn post_edit(origin: &Origin, png: &[u8], rect: Rect, prompt: &str) -> Result<Fetched> {
-        let body = selection_json(png, rect, Some(prompt));
+    pub fn post_edit(origin: &Origin, png: &[u8], rect: Rect, prompt: &str, aspect_ratio: Option<&str>) -> Result<Fetched> {
+        let body = selection_json(png, rect, Some(prompt), aspect_ratio);
         let resp = exchange(origin, "POST", "/v1/edit", "application/json", body.as_bytes(), Duration::from_secs(180))?;
         fetched(&resp, rect)
     }
 
     pub fn get_result(origin: &Origin) -> Result<Fetched> {
-        let resp = exchange(origin, "GET", "/result", "application/json", &[], Duration::from_secs(15))?;
+        get_image(origin, "/result")
+    }
+
+    pub fn get_accepted(origin: &Origin) -> Result<Fetched> {
+        get_image(origin, "/accepted")
+    }
+
+    pub fn accept_seq(origin: &Origin) -> Result<u64> {
+        let resp = exchange(origin, "GET", "/status", "application/json", &[], Duration::from_millis(800))?;
+        if !(200..300).contains(&resp.status) {
+            return Err(EngineError::Other(error_text(&resp)));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or(serde_json::Value::Null);
+        Ok(v.get("accept").and_then(serde_json::Value::as_u64).unwrap_or(0))
+    }
+
+    pub fn ack_placed(origin: &Origin) -> Result<()> {
+        let resp = exchange(origin, "POST", "/placed", "application/json", b"{}", Duration::from_secs(2))?;
+        expect_ok(&resp, "record the placed image")
+    }
+
+    fn get_image(origin: &Origin, path: &str) -> Result<Fetched> {
+        let resp = exchange(origin, "GET", path, "application/json", &[], Duration::from_secs(15))?;
         fetched(&resp, Rect::EMPTY)
     }
 
-    fn selection_json(png: &[u8], rect: Rect, prompt: Option<&str>) -> String {
+    fn selection_json(png: &[u8], rect: Rect, prompt: Option<&str>, aspect_ratio: Option<&str>) -> String {
         let mut v = json!({
             "png": b64(png),
             "x": rect.x0,
@@ -388,10 +512,13 @@ mod http {
             "width": rect.width(),
             "height": rect.height(),
         });
-        if let Some(prompt) = prompt
-            && let Some(obj) = v.as_object_mut()
-        {
-            obj.insert("prompt".into(), serde_json::Value::String(prompt.to_string()));
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(prompt) = prompt {
+                obj.insert("prompt".into(), serde_json::Value::String(prompt.to_string()));
+            }
+            if let Some(aspect_ratio) = aspect_ratio {
+                obj.insert("aspectRatio".into(), serde_json::Value::String(aspect_ratio.to_string()));
+            }
         }
         v.to_string()
     }
@@ -411,11 +538,7 @@ mod http {
     }
 
     fn expect_ok(resp: &Response, what: &str) -> Result<()> {
-        if (200..300).contains(&resp.status) {
-            Ok(())
-        } else {
-            Err(EngineError::Other(format!("could not {what}: {}", error_text(resp))))
-        }
+        if (200..300).contains(&resp.status) { Ok(()) } else { Err(EngineError::Other(format!("could not {what}: {}", error_text(resp)))) }
     }
 
     fn error_text(resp: &Response) -> String {
@@ -453,7 +576,8 @@ mod http {
 
     fn exchange(origin: &Origin, method: &str, path: &str, content_type: &str, body: &[u8], read_for: Duration) -> Result<Response> {
         let addr = format!("{}:{}", origin.host, origin.port);
-        let sock_addr = addr.to_socket_addrs().map_err(|e| unreachable_backend(origin, &e.to_string()))?.next().ok_or_else(|| unreachable_backend(origin, "no address"))?;
+        let sock_addr =
+            addr.to_socket_addrs().map_err(|e| unreachable_backend(origin, &e.to_string()))?.next().ok_or_else(|| unreachable_backend(origin, "no address"))?;
         let mut stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(2)).map_err(|e| unreachable_backend(origin, &e.to_string()))?;
         stream.set_read_timeout(Some(read_for)).map_err(|e| EngineError::Other(e.to_string()))?;
         stream.set_write_timeout(Some(Duration::from_secs(15))).map_err(|e| EngineError::Other(e.to_string()))?;
@@ -474,10 +598,7 @@ mod http {
     }
 
     fn unreachable_backend(origin: &Origin, detail: &str) -> EngineError {
-        EngineError::Other(format!(
-            "PhotoCraft Retouch is not running at {}. Start it and leave its window open, then try again ({detail}).",
-            origin.page()
-        ))
+        EngineError::Other(format!("PhotoCraft Retouch is not running at {}. Start it and leave its window open, then try again ({detail}).", origin.page()))
     }
 
     fn read_response(stream: &mut TcpStream) -> std::io::Result<Response> {
@@ -585,10 +706,19 @@ mod http {
     pub fn post_selection(_origin: &Origin, _png: &[u8], _rect: Rect) -> Result<()> {
         Err(unsupported())
     }
-    pub fn post_edit(_origin: &Origin, _png: &[u8], _rect: Rect, _prompt: &str) -> Result<Fetched> {
+    pub fn post_edit(_origin: &Origin, _png: &[u8], _rect: Rect, _prompt: &str, _aspect_ratio: Option<&str>) -> Result<Fetched> {
         Err(unsupported())
     }
     pub fn get_result(_origin: &Origin) -> Result<Fetched> {
+        Err(unsupported())
+    }
+    pub fn get_accepted(_origin: &Origin) -> Result<Fetched> {
+        Err(unsupported())
+    }
+    pub fn accept_seq(_origin: &Origin) -> Result<u64> {
+        Err(unsupported())
+    }
+    pub fn ack_placed(_origin: &Origin) -> Result<()> {
         Err(unsupported())
     }
 }
@@ -602,7 +732,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Place Generative Result",
             menu: &["Edit"],
             shortcut: None,
-            params: r##"{"url":"http://127.0.0.1:8787"?} — fetch the image the retouch backend finished and add it as a new layer on the selection"##,
+            params: r##"{"url":"http://127.0.0.1:8787"?,"accepted":bool=false (place the image the prompt page confirmed with Use this)} — fetch the finished retouch and add it as a new layer on the selection"##,
             enabled: enabled_place,
             run: place,
             journal: true,
@@ -612,7 +742,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Generative Retouch",
             menu: &["Edit"],
             shortcut: None,
-            params: r##"{"prompt":str? (when set, the backend runs Gemini immediately and the image is placed; when omitted, the selection is uploaded and the prompt is entered at the backend page),"url":"http://127.0.0.1:8787"?,"open":bool=true (open the prompt page when no prompt was given),"lang":"ja"|"zh-Hant"|"en"? (prompt page language; PhotoCraft passes the interface language)} — needs a square selection"##,
+            params: r##"{"prompt":str? (when set, the backend runs Gemini immediately and the image is placed; when omitted, the selection is uploaded and the prompt is entered at the backend page),"aspectRatio":"1:1"|"1:4"|"1:8"|"2:3"|"3:2"|"3:4"|"4:1"|"4:3"|"4:5"|"5:4"|"8:1"|"9:16"|"16:9"|"21:9"? (Gemini output ratio; omitted uses the selection's ratio),"url":"http://127.0.0.1:8787"?,"open":bool=true (open the prompt page when no prompt was given),"lang":"ja"|"zh-Hant"|"en"? (prompt page language; PhotoCraft passes the interface language)} — needs a selection within one pixel of a Gemini aspect ratio"##,
             enabled: enabled_send,
             run: send,
             journal: true,
@@ -644,6 +774,9 @@ mod tests {
     struct Slot {
         stop: bool,
         place: Option<(i64, i64, u64, u64)>,
+        /// When set, `/result` is empty and `/accepted` is the image Use this confirmed.
+        accepted_only: bool,
+        accept: u64,
     }
 
     struct Mock {
@@ -661,7 +794,7 @@ mod tests {
     fn mock(png: Vec<u8>) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let slot = Arc::new(Mutex::new(Slot { stop: false, place: None }));
+        let slot = Arc::new(Mutex::new(Slot { stop: false, place: None, accepted_only: false, accept: 0 }));
         let slot_w = Arc::clone(&slot);
         std::thread::spawn(move || {
             for conn in listener.incoming() {
@@ -679,12 +812,30 @@ mod tests {
     }
 
     fn handle_mock(sock: &mut TcpStream, result_png: &[u8], slot: &Mutex<Slot>) -> std::io::Result<()> {
-        let mut buf = vec![0u8; 256 * 1024];
-        let n = sock.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        let req = String::from_utf8_lossy(&buf[..n]);
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let req = loop {
+            let n = sock.read(&mut tmp)?;
+            if n == 0 {
+                if buf.is_empty() {
+                    return Ok(());
+                }
+                break String::from_utf8_lossy(&buf).into_owned();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.len() > 2 * 1024 * 1024 {
+                break String::from_utf8_lossy(&buf).into_owned();
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+            let length = head
+                .lines()
+                .find_map(|l| l.split_once(':').filter(|(n, _)| n.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.trim().parse::<usize>().ok()))
+                .unwrap_or(0);
+            if body.len() >= length {
+                break text.into_owned();
+            }
+        };
         let line = req.lines().next().unwrap_or("");
         let path = line.split(' ').nth(1).unwrap_or("");
         let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
@@ -698,16 +849,32 @@ mod tests {
             );
             slot.lock().unwrap_or_else(PoisonError::into_inner).place = Some(place);
         }
-        let place = slot.lock().unwrap_or_else(PoisonError::into_inner).place;
+        let slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let place = slot.place;
+        let accepted_only = slot.accepted_only;
+        let accept = slot.accept;
+        drop(slot);
         if path == "/selection" {
             let msg = json!({"ok": true, "imageSize": "1K"}).to_string();
+            return write_mock(sock, 200, "application/json", &[], msg.as_bytes());
+        }
+        if path == "/status" {
+            let msg = json!({"state": "ready", "accept": accept}).to_string();
+            return write_mock(sock, 200, "application/json", &[], msg.as_bytes());
+        }
+        if path == "/placed" {
+            let msg = json!({"ok": true, "placed": accept}).to_string();
             return write_mock(sock, 200, "application/json", &[], msg.as_bytes());
         }
         let Some((x, y, w, h)) = place else {
             let msg = json!({"error": "no retouch result yet; enter a prompt and send it"}).to_string();
             return write_mock(sock, 404, "application/json", &[], msg.as_bytes());
         };
-        if path == "/v1/edit" || path == "/generate" || path == "/result" {
+        if path == "/result" && accepted_only {
+            let msg = json!({"error": "no retouch result yet; enter a prompt and send it"}).to_string();
+            return write_mock(sock, 404, "application/json", &[], msg.as_bytes());
+        }
+        if path == "/v1/edit" || path == "/generate" || path == "/result" || path == "/accepted" {
             return write_png(sock, result_png, x, y, w, h);
         }
         let msg = json!({"error": "not found"}).to_string();
@@ -755,26 +922,46 @@ mod tests {
     }
 
     #[test]
-    fn square_is_required_and_bad_params_do_not_panic() {
+    fn a_gemini_ratio_is_required_and_bad_params_do_not_panic() {
         let mut s = Session::new();
         assert!(s.execute(SEND, json!({})).is_err());
         let mut s = session(8);
         assert!(!s.is_enabled(SEND));
-        s.execute("select.rect", json!({"x": 1, "y": 1, "width": 6, "height": 4})).unwrap();
-        assert!(s.execute(SEND, json!({})).is_err(), "a rectangle is not a square");
+        s.execute("select.rect", json!({"x": 1, "y": 1, "width": 4, "height": 9})).unwrap();
+        assert!(!s.is_enabled(SEND), "4×9 is not a Gemini ratio");
+        assert!(s.execute(SEND, json!({"open": false})).is_err());
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 16, "height": 9})).unwrap();
+        assert!(s.is_enabled(SEND), "16:9");
+        s.execute("select.rect", json!({"x": 1, "y": 2, "width": 6, "height": 4})).unwrap();
+        assert!(s.is_enabled(SEND), "3:2");
         s.execute("select.rect", json!({"x": 1, "y": 2, "width": 4, "height": 4})).unwrap();
         assert!(s.is_enabled(SEND));
         // One pixel of rounding (a 1:1 drag that did not land on a pixel boundary) still counts.
-        s.execute("select.rect", json!({"x": 1, "y": 1, "width": 5, "height": 4})).unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 15, "height": 16})).unwrap();
         assert!(s.is_enabled(SEND), "a selection one pixel off a square stays enabled");
-        assert_eq!(square(&s.active().unwrap().doc).unwrap().size(), photocraft_geom::Size::new(4, 4));
+        assert_eq!(frame(&s.active().unwrap().doc).unwrap().size(), photocraft_geom::Size::new(15, 15));
         assert!(s.execute(SEND, json!({"prompt": 1, "url": "http://127.0.0.1:9", "open": false})).is_err());
+        assert!(s.execute(SEND, json!({"aspectRatio": "2:1", "open": false})).is_err());
+        assert!(s.execute(SEND, json!({"aspectRatio": 16, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"lang": "ja/nope", "open": false})).is_err());
         assert!(s.execute(SEND, json!({"lang": 1, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": false, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": "https://example.com", "open": false})).is_err());
         assert!(s.execute(PLACE, json!({"url": "not a url"})).is_err());
+        assert!(s.execute(PLACE, json!({"accepted": "yes", "url": "http://127.0.0.1:9"})).is_err());
         assert_eq!(s.active().unwrap().doc.layers.len(), 1, "nothing was added");
+    }
+
+    #[test]
+    fn a_sixteen_by_nine_selection_is_accepted() {
+        let backend = mock(solid_png(2, 2, [0, 255, 0]));
+        let mut s = session(8);
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 16, "height": 9})).unwrap();
+        let uploaded = s.execute(SEND, json!({"url": backend.addr, "open": false})).unwrap();
+        assert_eq!(uploaded["aspectRatio"], "16:9");
+        assert_eq!(uploaded["width"], 16);
+        assert_eq!(uploaded["height"], 9);
+        assert_eq!(s.active().unwrap().doc.layers.len(), 1, "uploading does not add a layer");
     }
 
     #[test]
@@ -805,15 +992,7 @@ mod tests {
         assert!(s.is_enabled(PLACE));
         let again = s.execute(SEND, json!({"url": backend.addr, "prompt": "retouch skin", "open": false})).unwrap();
         assert!(again["layer"].as_u64().is_some());
-        let names: Vec<_> = s
-            .active()
-            .unwrap()
-            .doc
-            .layers
-            .iter()
-            .map(|l| l.name.as_str())
-            .filter(|n| n.starts_with("Generative Retouch"))
-            .collect();
+        let names: Vec<_> = s.active().unwrap().doc.layers.iter().map(|l| l.name.as_str()).filter(|n| n.starts_with("Generative Retouch")).collect();
         assert_eq!(names.len(), 2, "{names:?}");
     }
 
@@ -840,6 +1019,7 @@ mod tests {
         s.execute("select.rect", json!({"x": 1, "y": 1, "width": 4, "height": 4})).unwrap();
         let uploaded = s.execute(SEND, json!({"url": backend.addr, "open": false, "lang": "ja"})).unwrap();
         assert_eq!(uploaded["awaitingPrompt"], true);
+        assert_eq!(uploaded["aspectRatio"], "1:1");
         let page = uploaded["page"].as_str().unwrap_or("");
         assert!(page.starts_with("http://127.0.0.1:"), "{page}");
         assert!(page.ends_with("/ja"), "{page}");
@@ -847,7 +1027,10 @@ mod tests {
         // The page's Send is a POST /generate. The mock answers it the same way the backend does.
         let mut sock = TcpStream::connect(backend.addr.trim_start_matches("http://")).unwrap();
         let body = r#"{"prompt":"retouch skin"}"#;
-        let req = format!("POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let req = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
         sock.write_all(req.as_bytes()).unwrap();
         let mut buf = Vec::new();
         sock.read_to_end(&mut buf).unwrap();
@@ -858,5 +1041,24 @@ mod tests {
         assert!(px[1] > 0.9 && px[3] > 0.9, "{px:?}");
         let fmt = s.active().unwrap().doc.layers.iter().rev().find(|l| l.name.starts_with("Generative")).unwrap().surface().unwrap().format();
         assert_eq!(fmt.sample, photocraft_color::SampleType::U16);
+    }
+
+    #[test]
+    fn use_this_places_the_confirmed_image() {
+        let backend = mock(solid_png(2, 2, [0, 180, 0]));
+        let mut s = session(8);
+        s.execute("select.rect", json!({"x": 1, "y": 1, "width": 4, "height": 4})).unwrap();
+        s.execute(SEND, json!({"url": backend.addr, "open": false})).unwrap();
+        {
+            let mut slot = backend.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            slot.accepted_only = true;
+            slot.accept = 1;
+        }
+        assert_eq!(retouch_accept_seq(&backend.addr).unwrap(), 1);
+        let placed = s.execute(PLACE, json!({"url": backend.addr, "accepted": true})).unwrap();
+        assert!(placed["layer"].as_u64().is_some());
+        let px = layer_px(&s, 1, 1);
+        assert!(px[1] > 0.5 && px[3] > 0.9, "{px:?}");
+        assert!(s.execute(PLACE, json!({"url": backend.addr})).is_err(), "the menu fetch is the latest result, which this stand-in withholds");
     }
 }

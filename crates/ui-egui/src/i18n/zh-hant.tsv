@@ -2112,4 +2112,5 @@ cameraRaw	Blending	混合
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}：{prs} 個 PR，{commits} 次提交，行 +{added} / −{deleted}（Δ {delta}），二進位檔 +{binAdded} / −{binDeleted}，{first} – {last}
 	Generative Retouch	生成式潤飾
 	Place Generative Result	置入生成結果
-	Enter the retouch prompt at {page}, then {menu} › {command}	請在 {page} 輸入潤飾提示，然後選擇 {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	請在 {page} 輸入潤飾提示。「使用這張」會加入影像，「重新生成」會再試一次。
+	Added the generative result.	已加入生成結果。

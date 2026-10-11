@@ -1,6 +1,6 @@
 [package]
 name = "photocraft-gemini-retouch"
-description = "Local backend that retouches a square PhotoCraft selection with Gemini Nano Banana 2.1"
+description = "Local backend that retouches a PhotoCraft selection with Gemini Nano Banana 2.1"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

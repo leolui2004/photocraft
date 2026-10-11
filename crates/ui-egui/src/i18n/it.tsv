@@ -2207,5 +2207,6 @@ cameraRaw	Amount	Quantità
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PR, {commits} commit, +{added} / −{deleted} righe (Δ {delta}), +{binAdded} / −{binDeleted} risorse binarie, {first} – {last}
 	Generative Retouch	Ritocco generativo
 	Place Generative Result	Inserisci risultato generativo
-	Enter the retouch prompt at {page}, then {menu} › {command}	Inserisci il prompt di ritocco in {page}, poi scegli {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Inserisci il prompt di ritocco in {page}. Premi Use this per aggiungere l'immagine, oppure Regenerate per riprovare.
+	Added the generative result.	Risultato generativo aggiunto.
 	Convert to Layers	Converti in livelli

@@ -2118,4 +2118,5 @@ cameraRaw	Color	カラー
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR {prs} 件、コミット {commits} 件、行 +{added} / −{deleted} (Δ {delta})、バイナリ +{binAdded} / −{binDeleted}、{first} – {last}
 	Generative Retouch	生成レタッチ
 	Place Generative Result	生成結果を配置
-	Enter the retouch prompt at {page}, then {menu} › {command}	{page} でレタッチの指示を入力し、{menu} › {command} を選んでください
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	{page} でレタッチの指示を入力してください。「これを使う」で画像を追加し、「再生成」でもう一度試せます。
+	Added the generative result.	生成結果を追加しました。

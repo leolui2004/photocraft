@@ -1,7 +1,7 @@
 //! Local retouch backend for PhotoCraft.
 //!
-//! PhotoCraft sends a square selection here. The prompt is entered on the page this server
-//! hosts (or passed through by an agent), and the server calls Gemini Nano Banana 2.1.
+//! PhotoCraft sends a selection here. The prompt and aspect ratio are entered on the page this
+//! server hosts (or passed through by an agent), and the server calls Gemini Nano Banana 2.1.
 //! PhotoCraft then fetches the image and places it on a new layer. The API key stays here and
 //! never enters the editor. A shipped exe (release build, installer, portable zip) only uses the
 //! key the user pasted into the page. Debug builds (`cargo run`) may also read `GEMINI_API_KEY`
@@ -28,8 +28,8 @@ pub use server::Server;
 ///
 /// Logs and the prompt page are English unless `--lang ja` or `--lang zh-Hant` is passed
 /// (`--help` lists them). The browser opens on that page unless `--no-browser` is passed.
-/// PhotoCraft passes `--no-browser` and opens one page itself after the square is stored.
-/// `--open-on-selection` delays this process's own browser until the first square arrives.
+/// PhotoCraft passes `--no-browser` and opens one page itself after the selection is stored.
+/// `--open-on-selection` delays this process's own browser until the first selection arrives.
 pub fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     run_args(&args)

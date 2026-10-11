@@ -2174,4 +2174,5 @@
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PRs, {commits} Commits, +{added} / −{deleted} Zeilen (Δ {delta}), +{binAdded} / −{binDeleted} Binärdateien, {first} – {last}
 	Generative Retouch	Generative Retusche
 	Place Generative Result	Generatives Ergebnis platzieren
-	Enter the retouch prompt at {page}, then {menu} › {command}	Retusche-Anweisung unter {page} eingeben, dann {menu} › {command} wählen
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Retusche-Anweisung unter {page} eingeben. Use this fügt das Bild hinzu, Regenerate versucht es erneut.
+	Added the generative result.	Generatives Ergebnis hinzugefügt.

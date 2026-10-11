@@ -107,6 +107,7 @@ pub mod puppet_ui;
 pub mod quick_pick;
 pub mod rasterize_prompt;
 pub mod retouch_ui;
+mod retouch_watch;
 mod rgb_histogram;
 pub mod rulers;
 pub mod scrollbars;
@@ -455,6 +456,15 @@ pub struct PhotocraftApp {
     pub background_jobs: bool,
     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
     pub jobs: jobs_ui::JobsUi,
+    /// Context from the current frame, so a retouch confirm can wake the UI after the browser opens.
+    #[cfg(not(target_arch = "wasm32"))]
+    frame_ctx: Option<egui::Context>,
+    /// Prompt-page origin waiting for a context before its confirm watcher starts.
+    #[cfg(not(target_arch = "wasm32"))]
+    retouch_arm: Option<String>,
+    /// Polls the prompt page for Use this and places that image.
+    #[cfg(not(target_arch = "wasm32"))]
+    retouch_watch: Option<retouch_watch::Watch>,
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     live_tokens: theme::live::LiveTokens,
 }
@@ -539,6 +549,12 @@ impl PhotocraftApp {
             stylus: Default::default(),
             background_jobs: false,
             jobs: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            frame_ctx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            retouch_arm: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            retouch_watch: None,
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
             live_tokens: theme::live::LiveTokens::from_env(),
         };
@@ -690,6 +706,7 @@ impl PhotocraftApp {
                     && v.get("awaitingPrompt").and_then(Value::as_bool) == Some(true)
                     && let Some(page) = v.get("page").and_then(Value::as_str)
                 {
+                    retouch_watch::arm(self, page);
                     if shell_opens
                         && let Some(open) = self.services.open_url.as_ref()
                         && let Err(e) = open(page)
@@ -1078,6 +1095,11 @@ impl eframe::App for PhotocraftApp {
         // Background jobs: apply finished ones, keep frames coming, Esc cancels (before the
         // shortcuts see Esc).
         jobs_ui::tick(self, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.frame_ctx = Some(ctx.clone());
+        }
+        retouch_watch::tick(self, ctx);
         shortcuts::handle(self, ctx);
         let arrived: Vec<(String, Vec<u8>)> =
             self.services.inbox.as_ref().map(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default();

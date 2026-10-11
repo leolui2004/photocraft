@@ -1,5 +1,6 @@
-//! The local HTTP server. PhotoCraft uploads a square PNG; the browser page on `/` is where
-//! the prompt is typed and sent. The finished image is fetched back by PhotoCraft.
+//! The local HTTP server. PhotoCraft uploads a PNG whose shape matches a Gemini aspect ratio;
+//! the browser page on `/` is where the ratio and the prompt are chosen. The finished image is
+//! fetched back by PhotoCraft.
 
 use base64::Engine as _;
 use std::io::{Read, Write};
@@ -42,8 +43,13 @@ struct Selection {
     y: i32,
     width: u32,
     height: u32,
+    /// Gemini ratio label that matches `width`×`height` (`16:9`, `1:1`, …).
+    ratio: String,
+    /// Output tier for this selection (`1K`, `2K` or `4K`).
+    image_size: String,
 }
 
+#[derive(Clone)]
 struct Finished {
     png: Vec<u8>,
     x: i32,
@@ -56,6 +62,16 @@ struct Finished {
 struct State {
     selection: Option<Selection>,
     result: Option<Finished>,
+    /// Bumps each time a result is stored. 0 means there is no result.
+    result_revision: u64,
+    /// The image the page confirmed with Use this. Kept when a later generate replaces `result`.
+    accepted: Option<Finished>,
+    /// `result_revision` that `accepted` was copied from.
+    accepted_result: u64,
+    /// Bumps once per new confirmation. A repeat Use this on the same result does not bump it.
+    accept_seq: u64,
+    /// The `accept_seq` PhotoCraft has already placed.
+    placed: u64,
     generating: bool,
     error: Option<String>,
     /// Bumps each time a selection is stored, so an open page can replace its preview.
@@ -76,6 +92,8 @@ impl State {
             "empty"
         };
         let (width, height, x, y) = self.selection.as_ref().map(|s| (s.width, s.height, s.x, s.y)).unwrap_or((0, 0, 0, 0));
+        let aspect_ratio = self.selection.as_ref().map(|s| s.ratio.as_str());
+        let image_size = self.selection.as_ref().map(|s| s.image_size.as_str());
         json!({
             "state": state,
             "error": self.error,
@@ -83,8 +101,13 @@ impl State {
             "height": height,
             "x": x,
             "y": y,
-            "imageSize": self.selection.as_ref().map(|s| gemini::image_size_for(s.width)),
+            "aspectRatio": aspect_ratio,
+            "imageSize": image_size,
             "revision": self.revision,
+            "resultRevision": self.result_revision,
+            "acceptedResult": self.accepted_result,
+            "accept": self.accept_seq,
+            "placed": self.placed,
         })
     }
 }
@@ -205,8 +228,11 @@ fn route(req: &Incoming, gemini: &dyn Gemini, keys: &KeyStore, lang: Lang, open_
         ("GET", "/status") => json_out(200, &state().status()),
         ("GET", "/selection.png") => selection_png(),
         ("GET", "/result") => result_png(),
+        ("GET", "/accepted") => accepted_png(),
         ("POST", "/selection") => store_selection(&req.body, open_page),
         ("POST", "/generate") => generate(req, gemini),
+        ("POST", "/confirm") => confirm_result(),
+        ("POST", "/placed") => mark_placed(),
         ("POST", "/v1/edit") => edit_once(&req.body, gemini),
         _ => text(404, "not found"),
     }
@@ -219,7 +245,20 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 fn app_state() -> &'static Mutex<State> {
     use std::sync::OnceLock;
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(State { selection: None, result: None, generating: false, error: None, revision: 0 }))
+    STATE.get_or_init(|| {
+        Mutex::new(State {
+            selection: None,
+            result: None,
+            result_revision: 0,
+            accepted: None,
+            accepted_result: 0,
+            accept_seq: 0,
+            placed: 0,
+            generating: false,
+            error: None,
+            revision: 0,
+        })
+    })
 }
 
 fn html(page: &str) -> Outgoing {
@@ -270,6 +309,43 @@ fn result_png() -> Outgoing {
     }
 }
 
+fn accepted_png() -> Outgoing {
+    let g = state();
+    match &g.accepted {
+        Some(f) => png_out(&f.png, f),
+        None => text(404, "no image has been confirmed yet"),
+    }
+}
+
+/// The page's Use this. Copies the current result so a later regenerate cannot replace it
+/// before PhotoCraft places it. Pressing it again on the same result does not bump the counter.
+fn confirm_result() -> Outgoing {
+    let mut g = state();
+    if g.generating {
+        return text(409, "the retouch is still running");
+    }
+    let Some(result) = g.result.clone() else {
+        return text(400, "no retouch result yet; enter a prompt and send it");
+    };
+    let revision = g.result_revision;
+    if g.accepted_result == revision && g.accept_seq > 0 {
+        return json_out(200, &json!({"ok": true, "accept": g.accept_seq, "resultRevision": revision}));
+    }
+    g.accepted = Some(result);
+    g.accepted_result = revision;
+    g.accept_seq = g.accept_seq.saturating_add(1);
+    let seq = g.accept_seq;
+    json_out(200, &json!({"ok": true, "accept": seq, "resultRevision": revision}))
+}
+
+fn mark_placed() -> Outgoing {
+    let mut g = state();
+    if g.accept_seq > 0 {
+        g.placed = g.accept_seq;
+    }
+    json_out(200, &json!({"ok": true, "placed": g.placed}))
+}
+
 fn save_key(req: &Incoming, keys: &KeyStore) -> Outgoing {
     let raw = if req.content_type.starts_with("application/json") {
         match serde_json::from_slice::<Value>(&req.body) {
@@ -290,19 +366,21 @@ fn store_selection(body: &[u8], open_page: &OpenOnce) -> Outgoing {
         Ok(s) => s,
         Err(e) => return text(400, &e),
     };
-    let image_size = gemini::image_size_for(parsed.width);
+    let image_size = parsed.image_size.clone();
     let width = parsed.width;
     let height = parsed.height;
+    let aspect_ratio = parsed.ratio.clone();
     {
         let mut g = state();
         g.error = None;
         g.result = None;
+        g.result_revision = 0;
         g.revision = g.revision.saturating_add(1);
         g.selection = Some(parsed);
     }
-    // The square is visible to other requests before the browser is asked to open.
+    // The selection is visible to other requests before the browser is asked to open.
     open_page.fire();
-    json_out(200, &json!({"ok": true, "width": width, "height": height, "imageSize": image_size}))
+    json_out(200, &json!({"ok": true, "width": width, "height": height, "aspectRatio": aspect_ratio, "imageSize": image_size}))
 }
 
 fn parse_selection(body: &[u8]) -> Result<Selection, String> {
@@ -318,15 +396,19 @@ fn parse_selection(body: &[u8]) -> Result<Selection, String> {
     if width != iw || height != ih {
         return Err(format!("width/height {width}×{height} do not match the PNG ({iw}×{ih})"));
     }
-    gemini::check_square(width, height)?;
+    let prepared = gemini::prepare(width, height)?;
     let x = signed(&v, "x")?;
     let y = signed(&v, "y")?;
-    Ok(Selection { png, x, y, width, height })
+    Ok(Selection { png, x, y, width, height, ratio: prepared.ratio.to_string(), image_size: prepared.image_size.to_string() })
 }
 
 fn generate(req: &Incoming, gemini: &dyn Gemini) -> Outgoing {
     let prompt = match prompt_from(req) {
         Ok(p) => p,
+        Err(e) => return text(400, &e),
+    };
+    let aspect = match aspect_override(req) {
+        Ok(r) => r,
         Err(e) => return text(400, &e),
     };
     let selection = {
@@ -335,13 +417,14 @@ fn generate(req: &Incoming, gemini: &dyn Gemini) -> Outgoing {
             return text(409, "a retouch is already running");
         }
         let Some(sel) = g.selection.clone() else {
-            return text(400, "no selection yet; send a square selection from PhotoCraft first");
+            return text(400, "no selection yet; send a selection from PhotoCraft first");
         };
         g.generating = true;
         g.error = None;
         sel
     };
-    finish_edit(&selection.png, selection.x, selection.y, selection.width, &prompt, gemini)
+    let ratio = aspect.unwrap_or(selection.ratio.clone());
+    finish_edit(&selection, &ratio, &prompt, gemini)
 }
 
 fn edit_once(body: &[u8], gemini: &dyn Gemini) -> Outgoing {
@@ -358,6 +441,20 @@ fn edit_once(body: &[u8], gemini: &dyn Gemini) -> Outgoing {
         Ok(s) => s,
         Err(e) => return text(400, &e),
     };
+    let aspect = match v.get("aspectRatio") {
+        None => None,
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else if gemini::find_ratio(s).is_some() {
+                Some(s.to_string())
+            } else {
+                return text(400, &gemini::unknown_ratio());
+            }
+        }
+        Some(_) => return text(400, "`aspectRatio` must be a string"),
+    };
     {
         let mut g = state();
         if g.generating {
@@ -366,20 +463,61 @@ fn edit_once(body: &[u8], gemini: &dyn Gemini) -> Outgoing {
         g.generating = true;
         g.error = None;
         g.revision = g.revision.saturating_add(1);
-        g.selection = Some(Selection { png: selection.png.clone(), x: selection.x, y: selection.y, width: selection.width, height: selection.height });
+        g.selection = Some(selection.clone());
     }
-    finish_edit(&selection.png, selection.x, selection.y, selection.width, &prompt, gemini)
+    let ratio = aspect.unwrap_or(selection.ratio.clone());
+    finish_edit(&selection, &ratio, &prompt, gemini)
 }
 
-fn finish_edit(png: &[u8], x: i32, y: i32, side: u32, prompt: &str, gemini: &dyn Gemini) -> Outgoing {
-    let image_size = gemini::image_size_for(side).to_string();
-    let edited = gemini.edit(png, side, prompt);
+fn aspect_override(req: &Incoming) -> Result<Option<String>, String> {
+    if !req.content_type.starts_with("application/json") {
+        return Ok(None);
+    }
+    let v: Value = serde_json::from_slice(&req.body).map_err(|_| "the body must be JSON".to_string())?;
+    match v.get("aspectRatio") {
+        None => Ok(None),
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                Ok(None)
+            } else if gemini::find_ratio(s).is_some() {
+                Ok(Some(s.to_string()))
+            } else {
+                Err(gemini::unknown_ratio())
+            }
+        }
+        Some(_) => Err("`aspectRatio` must be a string".into()),
+    }
+}
+
+fn finish_edit(selection: &Selection, ratio_label: &str, prompt: &str, gemini: &dyn Gemini) -> Outgoing {
+    let Some(ratio) = gemini::find_ratio(ratio_label) else {
+        let mut g = state();
+        g.generating = false;
+        return text(400, &gemini::unknown_ratio());
+    };
+    let (x, y, width, height) = if ratio.label == selection.ratio {
+        (selection.x, selection.y, selection.width, selection.height)
+    } else {
+        gemini::inscribe(selection.x, selection.y, selection.width, selection.height, ratio)
+    };
+    let image_size = match gemini::image_size_for(width, height, ratio) {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            let mut g = state();
+            g.generating = false;
+            g.error = Some(e.clone());
+            return text(400, &e);
+        }
+    };
+    let edited = gemini.edit(&selection.png, ratio.label, &image_size, prompt);
     let mut g = state();
     g.generating = false;
     match edited {
         Ok(out) => {
-            let finished = Finished { png: out, x, y, width: side, height: side, image_size };
+            let finished = Finished { png: out, x, y, width, height, image_size };
             let response = png_out(&finished.png, &finished);
+            g.result_revision = g.result_revision.saturating_add(1);
             g.result = Some(finished);
             g.error = None;
             response
@@ -578,7 +716,19 @@ fn page_html(lang: Lang) -> String {
         "promptHint": text.prompt_hint,
         "hair": text.hair,
         "skin": text.skin,
+        "passerby": text.passerby,
+        "ratio": text.ratio,
+        "ratios": gemini::ratio_labels(),
         "send": text.send,
+        "use": text.use_this,
+        "again": text.again,
+        "showOriginal": text.show_original,
+        "showResult": text.show_result,
+        "adding": text.adding,
+        "added": text.added,
+        "confirmFailed": text.confirm_failed,
+        "menuFallback": text.menu_fallback,
+        "resultAlt": text.result_alt,
         "saving": text.saving,
         "saveFailed": text.save_failed,
         "saved": text.saved,
@@ -628,9 +778,12 @@ const PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
   button { font: inherit; padding: 8px 14px; border: 1px solid #555; background: #2a2a2a; color: inherit; cursor: pointer; }
   button.primary { background: #3d6df2; border-color: #3d6df2; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }
-  input { flex: 1; min-width: 12em; font: inherit; padding: 8px 10px; background: #111; color: inherit; border: 1px solid #444; }
+  input, select { font: inherit; padding: 8px 10px; background: #111; color: inherit; border: 1px solid #444; }
+  input { flex: 1; min-width: 12em; }
+  label { color: #bbb; }
   #keybox { margin: 0 0 18px; padding: 12px 14px; border: 1px solid #444; }
   a { color: #9eb6ff; }
+  #decide { margin-top: 10px; }
   #status { margin-top: 14px; min-height: 1.4em; }
   .err { color: #ff8a80; }
   .ok { color: #9ccc9c; }
@@ -648,10 +801,20 @@ const PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
     </div>
   </div>
   <div id="preview" class="empty"></div>
+  <div class="row" id="decide" hidden>
+    <button type="button" class="primary" id="use"></button>
+    <button type="button" id="again"></button>
+    <button type="button" id="flip"></button>
+  </div>
+  <div class="row" id="ratiorow">
+    <label id="ratiolabel" for="ratio"></label>
+    <select id="ratio"></select>
+  </div>
   <textarea id="prompt"></textarea>
   <div class="row">
     <button type="button" id="hair"></button>
     <button type="button" id="skin"></button>
+    <button type="button" id="passerby"></button>
     <button type="button" class="primary" id="send"></button>
   </div>
   <div id="status"></div>
@@ -674,17 +837,37 @@ document.getElementById("preview").textContent = T.empty;
 document.getElementById("prompt").placeholder = T.promptHint;
 document.getElementById("hair").textContent = T.hair;
 document.getElementById("skin").textContent = T.skin;
+document.getElementById("passerby").textContent = T.passerby;
+document.getElementById("ratiolabel").textContent = T.ratio;
+const ratio = document.getElementById("ratio");
+for (const name of T.ratios) {
+  const opt = document.createElement("option");
+  opt.value = name;
+  opt.textContent = name;
+  ratio.append(opt);
+}
 document.getElementById("send").textContent = T.send;
+document.getElementById("use").textContent = T.use;
+document.getElementById("again").textContent = T.again;
 const prompt = document.getElementById("prompt");
 const status = document.getElementById("status");
 const preview = document.getElementById("preview");
 const send = document.getElementById("send");
+const useBtn = document.getElementById("use");
+const again = document.getElementById("again");
+const flip = document.getElementById("flip");
+const decide = document.getElementById("decide");
 const keybox = document.getElementById("keybox");
 const apikey = document.getElementById("apikey");
 let keySet = false;
 let shownRevision = "";
+let shownResult = "";
+let view = "auto";
+let confirmAt = 0;
+let ratioRevision = "";
 document.getElementById("hair").onclick = () => { prompt.value = T.hair; };
 document.getElementById("skin").onclick = () => { prompt.value = T.skin; };
+document.getElementById("passerby").onclick = () => { prompt.value = T.passerby; };
 document.getElementById("savekey").onclick = async () => {
   note(T.saving);
   try {
@@ -700,7 +883,14 @@ document.getElementById("savekey").onclick = async () => {
 };
 function note(text, cls) { status.textContent = text; status.className = cls || ""; }
 function fill(template, info) {
-  return template.split("{w}").join(info.width).split("{h}").join(info.height).split("{size}").join(info.imageSize);
+  return template.split("{w}").join(info.width).split("{h}").join(info.height).split("{size}").join(info.imageSize).split("{ratio}").join(info.aspectRatio || "");
+}
+function syncRatio(info) {
+  if (!info.aspectRatio) return;
+  const rev = String(info.revision || 0);
+  if (ratioRevision === rev) return;
+  ratioRevision = rev;
+  ratio.value = info.aspectRatio;
 }
 function showSelection(info) {
   const live = info.state === "waiting" || info.state === "ready" || info.state === "generating" || info.state === "error";
@@ -723,6 +913,42 @@ function showSelection(info) {
   preview.className = "";
   preview.replaceChildren(img);
 }
+function showResult(info) {
+  const rev = String(info.resultRevision || 0);
+  if (rev === "0") return;
+  const existing = preview.querySelector("img");
+  if (existing && existing.dataset.result === rev && shownResult === rev) return;
+  shownResult = rev;
+  shownRevision = "";
+  const img = document.createElement("img");
+  img.alt = T.resultAlt;
+  img.dataset.result = rev;
+  img.src = "/result?rev=" + encodeURIComponent(rev) + "&t=" + Date.now();
+  preview.className = "";
+  preview.replaceChildren(img);
+}
+function showPreview(info) {
+  const rev = info.resultRevision || 0;
+  const hasResult = rev > 0;
+  if (hasResult && info.state === "ready" && view === "auto") showResult(info);
+  else if (view === "result" && info.state === "ready") showResult(info);
+  else if (info.state === "generating" && shownResult) { /* keep the image already on screen */ }
+  else showSelection(info);
+  const showingResult = hasResult && view !== "source" && info.state === "ready";
+  decide.hidden = !hasResult;
+  flip.textContent = showingResult ? T.showOriginal : T.showResult;
+  const confirmed = hasResult && info.acceptedResult === rev && info.accept > 0;
+  useBtn.disabled = !keySet || info.state !== "ready" || confirmed;
+  again.disabled = !keySet || info.state === "generating" || info.state === "empty" || !prompt.value.trim();
+}
+function noteReady(info) {
+  const rev = info.resultRevision || 0;
+  const confirmed = rev > 0 && info.acceptedResult === rev && info.accept > 0;
+  if (!confirmed) { note(T.ready, "ok"); return; }
+  if (info.placed >= info.accept) { note(T.added, "ok"); return; }
+  if (confirmAt && Date.now() - confirmAt < 4000) { note(T.adding); return; }
+  note(T.menuFallback);
+}
 async function refresh() {
   let info;
   try { info = await (await fetch("/status", { cache: "no-store" })).json(); }
@@ -732,20 +958,34 @@ async function refresh() {
     keySet = !!keyInfo.set;
     keybox.hidden = keySet;
   } catch (e) { /* the prompt page still works; Send will say if the key is missing */ }
-  showSelection(info);
+  syncRatio(info);
+  showPreview(info);
+  ratio.disabled = info.state === "generating" || info.state === "empty";
   if (info.state === "generating") note(T.sending);
-  else if (info.state === "ready") note(T.ready, "ok");
+  else if (info.state === "ready") noteReady(info);
   else if (info.state === "error") note(info.error || T.failed, "err");
   else if (info.state === "waiting") note(fill(T.received, info));
   else if (!keySet) note(T.needKey);
   else if (status.className !== "ok") note("");
   send.disabled = !keySet || info.state === "generating" || info.state === "empty";
 }
-send.onclick = async () => {
+flip.onclick = () => {
+  view = view === "source" ? "result" : "source";
+  if (view === "result") shownResult = "";
+  else shownRevision = "";
+  refresh();
+};
+async function submit() {
+  if (!keySet || !prompt.value.trim()) return;
   send.disabled = true;
+  useBtn.disabled = true;
+  again.disabled = true;
+  view = "auto";
   note(T.sending);
   try {
-    const res = await fetch("/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: prompt.value }) });
+    const body = { prompt: prompt.value };
+    if (ratioRevision) body.aspectRatio = ratio.value;
+    const res = await fetch("/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const kind = res.headers.get("content-type") || "";
     if (!res.ok) {
       const msg = kind.includes("json") ? (await res.json()).error : await res.text();
@@ -755,6 +995,26 @@ send.onclick = async () => {
     }
   } catch (e) {
     note(T.unreachable, "err");
+  }
+  refresh();
+}
+send.onclick = submit;
+again.onclick = submit;
+useBtn.onclick = async () => {
+  useBtn.disabled = true;
+  confirmAt = Date.now();
+  note(T.adding);
+  try {
+    const res = await fetch("/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const kind = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      const msg = kind.includes("json") ? (await res.json()).error : await res.text();
+      note(msg || T.confirmFailed, "err");
+      confirmAt = 0;
+    }
+  } catch (e) {
+    note(T.unreachable, "err");
+    confirmAt = 0;
   }
   refresh();
 };
@@ -780,12 +1040,12 @@ mod tests {
 
     struct Fake {
         png: Vec<u8>,
-        seen: Mutex<Option<(u32, String)>>,
+        seen: Mutex<Option<(String, String)>>,
     }
 
     impl Gemini for Fake {
-        fn edit(&self, _png: &[u8], side: u32, prompt: &str) -> Result<Vec<u8>, String> {
-            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some((side, prompt.to_string()));
+        fn edit(&self, _png: &[u8], aspect_ratio: &str, _image_size: &str, prompt: &str) -> Result<Vec<u8>, String> {
+            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some((aspect_ratio.to_string(), prompt.to_string()));
             Ok(self.png.clone())
         }
     }
@@ -816,6 +1076,11 @@ mod tests {
             let mut g = state();
             g.selection = None;
             g.result = None;
+            g.result_revision = 0;
+            g.accepted = None;
+            g.accepted_result = 0;
+            g.accept_seq = 0;
+            g.placed = 0;
             g.generating = false;
             g.error = None;
             g.revision = 0;
@@ -859,7 +1124,7 @@ mod tests {
         assert!(head.to_ascii_lowercase().contains("x-origin-y: 6"));
         assert!(head.to_ascii_lowercase().contains("x-image-size: 1k"));
         let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
-        assert_eq!(seen, (1, "remove stray hair".into()));
+        assert_eq!(seen, ("1:1".into(), "remove stray hair".into()));
 
         // A finished result must not disable Send. The page only disables it with no key,
         // while a retouch is running, or before any selection has arrived.
@@ -871,6 +1136,20 @@ mod tests {
         let page_src = page_html(Lang::En);
         assert!(page_src.contains(r#"send.disabled = !keySet || info.state === "generating" || info.state === "empty""#));
         assert!(page_src.contains("info.revision"));
+        assert!(page_src.contains("\"use\":\"Use this\""), "{page_src}");
+        assert!(page_src.contains("\"again\":\"Regenerate\""));
+        assert!(page_src.contains("/confirm"));
+        assert!(page_src.contains("resultRevision"));
+        let ja_page = page_html(Lang::Ja);
+        assert!(ja_page.contains("これを使う"), "{ja_page}");
+        assert!(ja_page.contains("再生成"));
+        assert!(ja_page.contains("ほつれ毛を消す"), "{ja_page}");
+        assert!(ja_page.contains("通行人を消す"), "{ja_page}");
+        assert!(page_src.contains("\"passerby\":\"Remove passerby\""), "{page_src}");
+        assert!(page_src.contains("\"ratio\":\"Aspect ratio\""), "{page_src}");
+        assert!(page_src.contains("\"16:9\""), "{page_src}");
+        assert!(page_src.contains("aspectRatio"), "{page_src}");
+        assert!(ja_page.contains("縦横比"), "{ja_page}");
         assert!(page_src.contains(r#"cache: "no-store""#));
         assert!(head.to_ascii_lowercase().contains("cache-control: no-store"));
         assert_eq!(path_lang("/ja"), Some(Lang::Ja));
@@ -886,7 +1165,7 @@ mod tests {
         assert_eq!(status, 200, "{head}");
         assert_eq!(body, png);
         let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
-        assert_eq!(seen, (1, "retouch skin".into()));
+        assert_eq!(seen, ("1:1".into(), "retouch skin".into()));
 
         let (status, _, again) = exchange(addr, "GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert_eq!(status, 200);
@@ -896,6 +1175,95 @@ mod tests {
         let posted = format!(
             "POST /v1/edit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bad}",
             bad.len()
+        );
+        let (status, _, _) = exchange(addr, &posted);
+        assert_eq!(status, 400);
+    }
+
+    fn png_wh(w: u32, h: u32) -> Vec<u8> {
+        let mut png = one_pixel();
+        png[16..20].copy_from_slice(&w.to_be_bytes());
+        png[20..24].copy_from_slice(&h.to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn a_wide_selection_keeps_its_ratio_and_can_switch_to_another() {
+        let _hold = hold_state();
+        {
+            let mut g = state();
+            g.selection = None;
+            g.result = None;
+            g.result_revision = 0;
+            g.accepted = None;
+            g.accepted_result = 0;
+            g.accept_seq = 0;
+            g.placed = 0;
+            g.generating = false;
+            g.error = None;
+            g.revision = 0;
+        }
+        let png = png_wh(16, 9);
+        let fake = Arc::new(Fake { png: one_pixel(), seen: Mutex::new(None) });
+        let keys = Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-ratio"), Some("present".into())));
+        let server = start("127.0.0.1:0".parse().unwrap(), fake.clone(), keys, Lang::En, None).unwrap();
+        let addr = server.addr;
+
+        let odd = png_wh(4, 9);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&odd);
+        let body = json!({"png": b64, "x": 0, "y": 0, "width": 4, "height": 9}).to_string();
+        let posted = format!(
+            "POST /selection HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 400, "{head}");
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let body = json!({"png": b64, "x": 10, "y": 4, "width": 16, "height": 9}).to_string();
+        let posted = format!(
+            "POST /selection HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, head, resp) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        let stored: Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(stored["aspectRatio"], "16:9");
+        assert_eq!(stored["imageSize"], "1K");
+
+        let prompt_body = r#"{"prompt":"remove passerby"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        let lower = head.to_ascii_lowercase();
+        assert!(lower.contains("x-origin-x: 10"), "{head}");
+        assert!(lower.contains("x-origin-width: 16"), "{head}");
+        assert!(lower.contains("x-origin-height: 9"), "{head}");
+        let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
+        assert_eq!(seen.0, "16:9");
+
+        let prompt_body = r#"{"prompt":"remove passerby","aspectRatio":"1:1"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        let lower = head.to_ascii_lowercase();
+        assert!(lower.contains("x-origin-x: 13"), "{head}");
+        assert!(lower.contains("x-origin-y: 4"), "{head}");
+        assert!(lower.contains("x-origin-width: 9"), "{head}");
+        assert!(lower.contains("x-origin-height: 9"), "{head}");
+        let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
+        assert_eq!(seen.0, "1:1");
+
+        let prompt_body = r#"{"prompt":"remove passerby","aspectRatio":"2:1"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
         );
         let (status, _, _) = exchange(addr, &posted);
         assert_eq!(status, 400);
@@ -946,6 +1314,11 @@ mod tests {
             let mut g = state();
             g.selection = None;
             g.result = None;
+            g.result_revision = 0;
+            g.accepted = None;
+            g.accepted_result = 0;
+            g.accept_seq = 0;
+            g.placed = 0;
             g.generating = false;
             g.error = None;
             g.revision = 0;
@@ -994,5 +1367,116 @@ mod tests {
         let after: Value = serde_json::from_slice(&after).unwrap();
         assert_eq!(after["state"], "waiting");
         assert_eq!(after["revision"].as_u64().unwrap(), revision + 2);
+    }
+
+    #[test]
+    fn use_this_keeps_that_image_and_a_second_press_does_not_count_again() {
+        let _hold = hold_state();
+        {
+            let mut g = state();
+            g.selection = None;
+            g.result = None;
+            g.result_revision = 0;
+            g.accepted = None;
+            g.accepted_result = 0;
+            g.accept_seq = 0;
+            g.placed = 0;
+            g.generating = false;
+            g.error = None;
+            g.revision = 0;
+        }
+        let png = one_pixel();
+        let fake = Arc::new(Fake { png: png.clone(), seen: Mutex::new(None) });
+        let keys = Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-confirm"), Some("present".into())));
+        let server = start("127.0.0.1:0".parse().unwrap(), fake, keys, Lang::En, None).unwrap();
+        let addr = server.addr;
+
+        let (status, _, _) =
+            exchange(addr, "POST /confirm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 400);
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let body = json!({"png": b64, "x": 8, "y": 9, "width": 1, "height": 1}).to_string();
+        let posted = format!(
+            "POST /selection HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+
+        let prompt_body = r#"{"prompt":"remove stray hair"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+
+        {
+            let mut g = state();
+            g.generating = true;
+        }
+        let (status, _, _) =
+            exchange(addr, "POST /confirm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 409);
+        {
+            let mut g = state();
+            g.generating = false;
+        }
+
+        let (status, head, resp) =
+            exchange(addr, "POST /confirm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 200, "{head}");
+        let confirmed: Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(confirmed["accept"], 1);
+        assert_eq!(confirmed["resultRevision"], 1);
+
+        let (status, head, again) =
+            exchange(addr, "POST /confirm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 200, "{head}");
+        let again: Value = serde_json::from_slice(&again).unwrap();
+        assert_eq!(again["accept"], 1, "the same image is not a second confirmation");
+
+        let (status, head, body) = exchange(addr, "GET /accepted HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200, "{head}");
+        assert_eq!(body, png);
+        assert!(head.to_ascii_lowercase().contains("x-origin-x: 8"));
+
+        let (status, _, status_body) = exchange(addr, "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200);
+        let status_json: Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["accept"], 1);
+        assert_eq!(status_json["placed"], 0);
+        assert_eq!(status_json["acceptedResult"], 1);
+
+        let (status, _, placed_body) =
+            exchange(addr, "POST /placed HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 200);
+        let placed: Value = serde_json::from_slice(&placed_body).unwrap();
+        assert_eq!(placed["placed"], 1);
+
+        let prompt_body = r#"{"prompt":"retouch skin"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        let (status, _, kept) = exchange(addr, "GET /accepted HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200);
+        assert_eq!(kept, png, "regenerate does not replace the confirmed image");
+
+        let (status, _, status_body) = exchange(addr, "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200);
+        let status_json: Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["resultRevision"], 2);
+        assert_eq!(status_json["acceptedResult"], 1, "the new image is not confirmed yet");
+
+        let (status, _, resp) =
+            exchange(addr, "POST /confirm HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        assert_eq!(status, 200);
+        let confirmed: Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(confirmed["accept"], 2);
+        assert_eq!(confirmed["resultRevision"], 2);
     }
 }

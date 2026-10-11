@@ -2135,4 +2135,5 @@ cameraRaw	Color	Barvy
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR: {prs}, commity: {commits}, řádky +{added} / −{deleted} (Δ {delta}), binární soubory +{binAdded} / −{binDeleted}, {first} – {last}
 	Generative Retouch	Generativní retuš
 	Place Generative Result	Umístit generativní výsledek
-	Enter the retouch prompt at {page}, then {menu} › {command}	Zadejte pokyn retuše na {page} a pak zvolte {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Zadejte pokyn retuše na {page}. Use this přidá obrázek, Regenerate to zkusí znovu.
+	Added the generative result.	Generativní výsledek byl přidán.

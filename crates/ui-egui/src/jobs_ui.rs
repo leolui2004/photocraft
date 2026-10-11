@@ -382,11 +382,11 @@ pub fn bytes(b: &[u8]) -> OpenSource {
     OpenSource::Bytes(Arc::new(b.to_vec()))
 }
 
-/// Status after the prompt page opens. `{menu}` and `{command}` are the translated Edit menu names.
+/// Status after the prompt page opens. Use this and Regenerate are the buttons on that page.
 pub fn retouch_prompt_status(page: &str) -> String {
     crate::i18n::fmt(
-        tl!("Enter the retouch prompt at {page}, then {menu} › {command}"),
-        &[("page", page), ("menu", tl!("Edit")), ("command", tl!("Place Generative Result"))],
+        tl!("Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again."),
+        &[("page", page)],
     )
 }
 

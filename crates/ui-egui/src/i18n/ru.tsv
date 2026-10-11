@@ -2409,4 +2409,5 @@ cameraRaw	Roughness	Неровность
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR: {prs}, коммиты: {commits}, строки +{added} / −{deleted} (Δ {delta}), двоичные файлы +{binAdded} / −{binDeleted}, {first} – {last}
 	Generative Retouch	Генеративная ретушь
 	Place Generative Result	Поместить генеративный результат
-	Enter the retouch prompt at {page}, then {menu} › {command}	Введите запрос ретуши на {page}, затем выберите {menu} › {command}
+	Enter the retouch prompt at {page}. Press Use this to add the image, or Regenerate to try again.	Введите запрос ретуши на {page}. Use this добавляет изображение, Regenerate пробует ещё раз.
+	Added the generative result.	Генеративный результат добавлен.
