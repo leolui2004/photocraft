@@ -260,6 +260,8 @@ pub struct Services {
     pub encode_png: Option<EncodePngFn>,
     /// Open a URL in the system browser (native). Falls back to `ctx.open_url` (web) when unset.
     pub open_url: Option<OpenUrlFn>,
+    /// Start the local retouch helper when it is installed and not already listening (desktop).
+    pub ensure_retouch: Option<Box<dyn Fn() -> Result<(), String>>>,
     /// Files delivered asynchronously (web file pickers, drag-and-drop): drained every frame.
     pub inbox: Option<Inbox>,
     /// OS clipboard images: copies go out, screenshots and images from other apps come in.
@@ -645,7 +647,20 @@ impl PhotocraftApp {
         }
         // Long commands become background jobs when enabled (`jobs_ui`); the rest run inline.
         let params = self.with_mask_target(id, params);
-        let r = jobs_ui::run(self, id, params);
+        // The desktop app starts PhotoCraft Retouch when the user asks for a retouch and it is
+        // installed beside the app. The helper holds the API key; this only launches it.
+        let ensured = if id == "edit.generativeRetouch" {
+            match self.services.ensure_retouch.as_ref() {
+                Some(ensure) => ensure(),
+                None => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
+        let r = match ensured {
+            Ok(()) => jobs_ui::run(self, id, params),
+            Err(e) => Err(e),
+        };
         if r.is_ok() && matches!(id, "edit.copy" | "edit.cut" | "edit.copyMerged") {
             self.clip_external = false;
             self.export_os_clipboard();

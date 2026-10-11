@@ -230,6 +230,44 @@ fn drag(app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2], m: Modifiers) {
     tool_event(app, ToolEvent::Up { x: to[0], y: to[1] }, m);
 }
 
+#[test]
+fn one_to_one_ratio_stays_square_in_pixels_and_enables_generative_retouch() {
+    let px = crate::canvas::marquee_px([10.2, 20.9], [60.5, 71.2]);
+    assert_eq!(px[2] - px[0], px[3] - px[1], "floor/ceil must not break a 1:1 drag: {px:?}");
+    // The square runs past a short canvas: the committed selection is the part that fits, still square.
+    let fitted = crate::canvas::marquee_px_on_canvas([10.4, 5.9], [70.6, 66.1], [0, 0, 80, 60]);
+    assert_eq!(fitted[2] - fitted[0], fitted[3] - fitted[1], "{fitted:?}");
+    assert!(fitted[0] >= 0.0 && fitted[1] >= 0.0 && fitted[2] <= 80.0 && fitted[3] <= 60.0, "{fitted:?}");
+
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
+    app.ui.extras.snap = false;
+    app.ui.tool = Tool::RectMarquee;
+    app.ui.tool_options.marquee_style = "fixedRatio".into();
+    app.ui.tool_options.marquee_width = 1.0;
+    app.ui.tool_options.marquee_height = 1.0;
+    drag(&mut app, [10.2, 20.9], [60.5, 71.2], Modifiers::NONE);
+    let b = selection_bounds(&app);
+    assert!(!b.is_empty() && b.width() == b.height(), "the committed 1:1 selection is square: {b:?}");
+    assert!(app.session.is_enabled("edit.generativeRetouch"), "{b:?}");
+
+    app.run("file.new", json!({"width": 80, "height": 60})).unwrap();
+    app.ui.extras.snap = false;
+    app.ui.tool = Tool::RectMarquee;
+    app.ui.tool_options.marquee_style = "fixedRatio".into();
+    app.ui.tool_options.marquee_width = 1.0;
+    app.ui.tool_options.marquee_height = 1.0;
+    drag(&mut app, [10.4, 5.9], [70.6, 66.1], Modifiers::NONE);
+    let b = selection_bounds(&app);
+    assert!(!b.is_empty() && b.width() == b.height(), "a 1:1 drag cut by the canvas stays square: {b:?}");
+    assert!(b.x0 >= 0 && b.y0 >= 0 && b.x1 <= 80 && b.y1 <= 60, "{b:?}");
+    assert!(app.session.is_enabled("edit.generativeRetouch"), "{b:?}");
+}
+
+fn selection_bounds(app: &PhotocraftApp) -> Rect {
+    app.session.active().unwrap().doc.selection.as_ref().map_or(Rect::EMPTY, |s| s.content_bounds())
+}
+
 /// A drag inside the ants moves the outline (`select.transformSelection`); ⇧ still draws (adds);
 /// a click inside deselects.
 #[test]

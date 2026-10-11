@@ -120,8 +120,87 @@ pub fn marquee_corners(o: &crate::state::ToolOptions, d: &Drag, end: [f64; 2]) -
 }
 
 /// The pixel rectangle `[x0, y0, x1, y1]` a marquee between two corners selects.
+///
+/// A geometrically square drag (⇧, Fixed Ratio 1:1, equal Fixed Size) stays square in pixels.
+/// Flooring one corner and ceiling the other can add a pixel on only one axis when the two
+/// corners do not share a fractional part.
 pub fn marquee_px(a: [f64; 2], b: [f64; 2]) -> [f64; 4] {
-    [a[0].min(b[0]).floor(), a[1].min(b[1]).floor(), a[0].max(b[0]).ceil(), a[1].max(b[1]).ceil()]
+    let r = [a[0].min(b[0]).floor(), a[1].min(b[1]).floor(), a[0].max(b[0]).ceil(), a[1].max(b[1]).ceil()];
+    if geometrically_square(a, b) { equalize_square(r, a, b) } else { r }
+}
+
+/// [`marquee_px`], then the largest square of that rect that lies on `canvas` (`[x0, y0, x1, y1)`).
+/// A 1:1 drag that crosses the canvas stays square, so Edit › Generative Retouch can use it.
+/// A drag that is not square is left for `select.rect` to clip.
+pub fn marquee_px_on_canvas(a: [f64; 2], b: [f64; 2], canvas: [i32; 4]) -> [f64; 4] {
+    let r = marquee_px(a, b);
+    if geometrically_square(a, b) { fit_square(r, canvas) } else { r }
+}
+
+fn geometrically_square(a: [f64; 2], b: [f64; 2]) -> bool {
+    let w = (a[0] - b[0]).abs();
+    let h = (a[1] - b[1]).abs();
+    w.is_finite() && h.is_finite() && w >= 1.0 && (w - h).abs() <= 1e-4
+}
+
+/// Drop the extra pixel floor/ceil added on the longer axis. Ties keep the press-side edge.
+fn equalize_square(r: [f64; 4], a: [f64; 2], b: [f64; 2]) -> [f64; 4] {
+    let [mut x0, mut y0, mut x1, mut y1] = r;
+    let dw = (x1 - x0) - (y1 - y0);
+    if !(0.5..1.5).contains(&dw.abs()) {
+        return r;
+    }
+    let (gx0, gy0) = (a[0].min(b[0]), a[1].min(b[1]));
+    let (gx1, gy1) = (a[0].max(b[0]), a[1].max(b[1]));
+    if dw > 0.0 {
+        if gx0 - x0 > x1 - gx1 { x0 += 1.0 } else { x1 -= 1.0 }
+    } else if gy0 - y0 > y1 - gy1 {
+        y0 += 1.0;
+    } else {
+        y1 -= 1.0;
+    }
+    [x0, y0, x1, y1]
+}
+
+/// Largest square inside both `r` and `canvas`. The edge that was not cut by the canvas stays put.
+fn fit_square(r: [f64; 4], canvas: [i32; 4]) -> [f64; 4] {
+    let [x0, y0, x1, y1] = r;
+    if ![x0, y0, x1, y1].into_iter().all(f64::is_finite) {
+        return r;
+    }
+    let [cx0, cy0, cx1, cy1] = canvas.map(|v| v as f64);
+    let (ix0, iy0) = (x0.max(cx0), y0.max(cy0));
+    let (ix1, iy1) = (x1.min(cx1), y1.min(cy1));
+    let side = (ix1 - ix0).min(iy1 - iy0).floor();
+    if side < 2.0 {
+        return r;
+    }
+    let sx = pin_axis(ix0, ix1, x0, x1, cx0, cx1, side);
+    let sy = pin_axis(iy0, iy1, y0, y1, cy0, cy1, side);
+    [sx, sy, sx + side, sy + side]
+}
+
+fn pin_axis(lo: f64, hi: f64, orig_lo: f64, orig_hi: f64, canvas_lo: f64, canvas_hi: f64, side: f64) -> f64 {
+    let cut_lo = orig_lo < canvas_lo;
+    let cut_hi = orig_hi > canvas_hi;
+    let pos = if cut_lo && !cut_hi {
+        hi - side
+    } else if !cut_lo && cut_hi {
+        lo
+    } else if cut_lo && cut_hi {
+        lo + ((hi - lo) - side) / 2.0
+    } else {
+        lo
+    };
+    pos.clamp(lo, (hi - side).max(lo)).floor()
+}
+
+/// Pixel rect the marquee will commit, squared and kept on the open document when the drag is square.
+fn committed_marquee_px(app: &PhotocraftApp, a: [f64; 2], b: [f64; 2]) -> [f64; 4] {
+    match app.session.active().map(|st| st.doc.bounds()) {
+        Some(c) => marquee_px_on_canvas(a, b, [c.x0, c.y0, c.x1, c.y1]),
+        None => marquee_px(a, b),
+    }
 }
 
 /// The size readout shown beside the cursor while dragging a marquee: the width and height values.
@@ -2295,7 +2374,7 @@ fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &View
     let last = d.points.last().map(|p| [p[0], p[1]]).unwrap_or(d.start);
     let marquee = matches!(d.tool, Tool::RectMarquee | Tool::EllipseMarquee).then(|| marquee_corners(&app.ui.tool_options, d, last));
     if let Some((a, b)) = marquee {
-        draw_marquee_readout(painter.ctx(), xf.to_screen(last[0] as f32, last[1] as f32), marquee_readout(marquee_px(a, b)));
+        draw_marquee_readout(painter.ctx(), xf.to_screen(last[0] as f32, last[1] as f32), marquee_readout(committed_marquee_px(app, a, b)));
     }
     match d.tool {
         // The canvas shows the live stroke itself (`LiveStroke`).
@@ -2752,7 +2831,7 @@ pub(crate) fn finish_gesture(app: &mut PhotocraftApp, d: Drag) {
         }
         Tool::RectMarquee | Tool::EllipseMarquee => {
             let (a, b) = marquee_corners(&app.ui.tool_options, &d, [end[0], end[1]]);
-            let [x0, y0, x1, y1] = marquee_px(a, b);
+            let [x0, y0, x1, y1] = committed_marquee_px(app, a, b);
             if x1 - x0 < 2.0 || y1 - y0 < 2.0 {
                 if app.session.is_enabled("select.deselect") {
                     let _ = app.run("select.deselect", json!({}));

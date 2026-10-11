@@ -78,9 +78,10 @@ in `ci.yml`. Rules: `../craftrules/standards/fonts.md`; build option: `docs/deve
   The plist sets `LSMinimumSystemVersion` 11.0, `NSHighResolutionCapable`, and document types:
   `.pcraft` (Owner), plus PSD/PSB and the image formats PhotoCraft reads (Alternate, so it never
   takes over Preview's defaults). The icon is `assets/app-icon/photocraft.icns`.
-- **Signing** goes inside-out with the hardened runtime and a secure timestamp. The executable
-  is signed first, then the bundle. There's no `--deep` on the final signature. The
-  entitlements (`entitlements.plist`) are deliberately empty.
+- **Signing** goes inside-out with the hardened runtime and a secure timestamp. The retouch
+  helper (`Contents/MacOS/photocraft-gemini-retouch`) is signed first, then the main executable,
+  then the bundle. There's no `--deep` on the final signature. The entitlements
+  (`entitlements.plist`) are deliberately empty.
 - **Notarization:** the app is zipped and sent with `xcrun notarytool submit --wait`, then the
   ticket is stapled to the app. The app goes on a DMG (`hdiutil`, with an `Applications` link
   to drag onto). The DMG is signed, notarized and stapled too. The script checks the results
@@ -120,8 +121,8 @@ goes in `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, so host build scripts aren't affected
   VERSIONINFO with the `winresource` crate. It only does this when targeting Windows. Elsewhere
   it's a no-op, and the web build doesn't touch that crate.
 - Release builds use the GUI subsystem, so Start Menu launches don't open a console window.
-- `photocraft.wxs` (WiX v5) is a per-machine install into Program Files with an advertised
-  Start Menu shortcut. PhotoCraft becomes the default app for `.pcraft` and is listed under
+- `photocraft.wxs` (WiX v5) is a per-machine install into Program Files with advertised
+  Start Menu shortcuts for PhotoCraft and PhotoCraft Retouch. PhotoCraft becomes the default app for `.pcraft` and is listed under
   "Open with" for PSD/PSB and image files. It also registers App Paths (Win+R `photocraft`).
   The MSI version is the numeric `X.Y.Z`, because MSI has no pre-release field. Same-version
   upgrades are allowed so that release candidates replace each other.
@@ -150,7 +151,7 @@ Locally on Windows: `dotnet tool install -g wix --version 5.0.2`, then
 ### Linux
 
 `packaging/linux/package.sh` stages one FHS tree and makes every format from it. The tree
-holds both binaries, `ai.storyteller.photocraft.desktop`, hicolor icons from 16 px to 512 px
+holds `photocraft`, `photocraft-cli` and `photocraft-gemini-retouch`, the PhotoCraft and PhotoCraft Retouch desktop entries, hicolor icons from 16 px to 512 px
 plus a scalable SVG, AppStream metainfo, and a shared-mime-info file for `.pcraft`, `.psb` and
 `.qoi`.
 
@@ -231,7 +232,7 @@ FreeBSD CI workflow (`.github/workflows/freebsd.yml`) plus `bash`. The script bu
 binaries with `CARGO_BUILD_JOBS=4` (more runs the 12 GB VM out of memory) and writes
 `photocraft-<v>-freebsd-x86_64.tar.gz`. FreeBSD's `uname -m` says `amd64`; the file name uses
 `x86_64` like the other artifacts. The tarball is a `/usr/local`-style tree: `bin/photocraft`,
-`bin/photocraft-cli`, and under `share/` the same desktop entry, MIME type, AppStream metainfo
+`bin/photocraft-cli`, `bin/photocraft-gemini-retouch`, and under `share/` the same desktop entries, MIME type, AppStream metainfo
 and hicolor icons as Linux, plus the licences, `NOTICE` and `ATTRIBUTION.md` in
 `share/doc/photocraft/`. Users install it with:
 

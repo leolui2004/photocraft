@@ -72,7 +72,7 @@ jobs:
           $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', 'install.log' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "msiexec /i exited $($p.ExitCode)" }
           $dir = Join-Path $env:ProgramFiles 'PhotoCraft'
-          foreach ($exe in 'photocraft.exe', 'photocraft-cli.exe') {
+          foreach ($exe in 'photocraft.exe', 'photocraft-cli.exe', 'photocraft-gemini-retouch.exe') {
             $path = Join-Path $dir $exe
             if (-not (Test-Path $path)) { throw "$exe not installed in $dir" }
             $bytes = [System.IO.File]::ReadAllBytes($path)

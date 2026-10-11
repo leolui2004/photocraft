@@ -25,17 +25,22 @@ pub enum UsageLabel {
 pub struct Options {
     pub lang: Lang,
     pub help: bool,
+    /// Open the prompt page in a browser once the server is listening.
+    pub open_browser: bool,
 }
 
 /// `--lang en|ja|zh-Hant`. Unknown flags are an error so a typo is not a silent English log.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
     let mut lang = Lang::En;
     let mut help = false;
+    let mut open_browser = true;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_ref();
         if arg == "--help" || arg == "-h" {
             help = true;
+        } else if arg == "--no-browser" {
+            open_browser = false;
         } else if arg == "--lang" || arg == "--language" {
             i += 1;
             let Some(value) = args.get(i).map(|s| s.as_ref()) else {
@@ -49,7 +54,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         }
         i += 1;
     }
-    Ok(Options { lang, help })
+    Ok(Options { lang, help, open_browser })
 }
 
 fn parse_lang_code(raw: &str) -> Result<Lang, ()> {
@@ -75,31 +80,34 @@ impl Lang {
         match self {
             Lang::En => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
 
-  (default)          English logs
+  (default)          English logs, and a browser window
   --lang ja          Japanese logs
   --lang zh-Hant     Traditional Chinese logs
+  --no-browser       Do not open a browser
   --help             Show this help
 "
             }
             Lang::Ja => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
 
-  （既定）           英語のログ
+  （既定）           英語のログとブラウザ
   --lang ja          日本語のログ
   --lang zh-Hant     繁体字中国語のログ
+  --no-browser       ブラウザを開かない
   --help             このヘルプを表示
 "
             }
             Lang::ZhHant => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
 
-  （預設）           英文日誌
+  （預設）           英文日誌，並開啟瀏覽器
   --lang ja          日文日誌
   --lang zh-Hant     繁體中文日誌
+  --no-browser       不要開啟瀏覽器
   --help             顯示此說明
 "
             }
@@ -122,11 +130,19 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant]
         }
     }
 
+    pub fn banner_leave_open(self) -> &'static str {
+        match self {
+            Lang::En => "Leave this window open. Closing it stops retouch.",
+            Lang::Ja => "このウィンドウは開いたままにしてください。閉じるとレタッチが止まります。",
+            Lang::ZhHant => "請保持此視窗開啟。關閉後潤飾會停止。",
+        }
+    }
+
     pub fn err_missing_key(self) -> &'static str {
         match self {
-            Lang::En => "set GEMINI_API_KEY in .env (see .env.example) or in the environment",
-            Lang::Ja => ".env（.env.example を参照）または環境変数に GEMINI_API_KEY を設定してください",
-            Lang::ZhHant => "請在 .env（參見 .env.example）或環境變數中設定 GEMINI_API_KEY",
+            Lang::En => "Paste a Gemini API key on the PhotoCraft Retouch page and press Save. Get a key at https://aistudio.google.com/apikey",
+            Lang::Ja => "PhotoCraft Retouch のページに Gemini API キーを貼り付けて Save を押してください。キーは https://aistudio.google.com/apikey で取得できます",
+            Lang::ZhHant => "請在 PhotoCraft Retouch 頁面貼上 Gemini API 金鑰並按 Save。金鑰可在 https://aistudio.google.com/apikey 取得",
         }
     }
 
@@ -180,9 +196,9 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant]
 
     pub fn err_unknown_arg(self, arg: &str) -> String {
         match self {
-            Lang::En => format!("unknown argument `{arg}` (expected --lang en|ja|zh-Hant)"),
-            Lang::Ja => format!("不明な引数 `{arg}` です（--lang en|ja|zh-Hant を指定してください）"),
-            Lang::ZhHant => format!("不明的參數 `{arg}`（請使用 --lang en|ja|zh-Hant）"),
+            Lang::En => format!("unknown argument `{arg}` (expected --lang en|ja|zh-Hant or --no-browser)"),
+            Lang::Ja => format!("不明な引数 `{arg}` です（--lang en|ja|zh-Hant または --no-browser を指定してください）"),
+            Lang::ZhHant => format!("不明的參數 `{arg}`（請使用 --lang en|ja|zh-Hant 或 --no-browser）"),
         }
     }
 
@@ -268,6 +284,8 @@ mod tests {
         let opts = parse_args::<&str>(&[]).unwrap();
         assert_eq!(opts.lang, Lang::En);
         assert!(!opts.help);
+        assert!(opts.open_browser);
+        assert!(!parse_args(&["--no-browser"]).unwrap().open_browser);
 
         assert_eq!(parse_args(&["--lang", "ja"]).unwrap().lang, Lang::Ja);
         assert_eq!(parse_args(&["--language", "japanese"]).unwrap().lang, Lang::Ja);

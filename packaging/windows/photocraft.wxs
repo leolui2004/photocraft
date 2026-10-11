@@ -105,6 +105,14 @@
       <Component Id="PhotocraftCli">
         <File Id="PhotocraftCliExe" Source="$(var.BinDir)\photocraft-cli.exe" KeyPath="yes" />
       </Component>
+
+      <Component Id="PhotocraftRetouch" Guid="C3A91E74-6B28-4F0D-9E55-18D7A2B64C08">
+        <File Id="PhotocraftRetouchExe" Source="$(var.BinDir)\photocraft-gemini-retouch.exe" KeyPath="yes">
+          <Shortcut Id="RetouchShortcut" Directory="ProgramMenuFolder" Name="PhotoCraft Retouch"
+              Description="Start the helper PhotoCraft uses for generative retouch" WorkingDirectory="INSTALLFOLDER"
+              Advertise="yes" Icon="PhotocraftIcon.exe" IconIndex="0" />
+        </File>
+      </Component>
     </ComponentGroup>
   </Fragment>
 </Wix>

@@ -30,12 +30,19 @@ fn square(doc: &Document) -> std::result::Result<Rect, String> {
     let Some(sel) = doc.selection.as_ref() else {
         return Err("select a square region first".into());
     };
-    let b = sel.content_bounds();
+    let mut b = sel.content_bounds();
     if b.is_empty() {
         return Err("the selection is empty".into());
     }
-    if b.width() != b.height() {
-        return Err(format!("the selection must be square (it is {}×{})", b.width(), b.height()));
+    // A 1:1 marquee is square in document space, but floor/ceil (or one pixel of anti-aliasing)
+    // can leave the mask one pixel off. Use the inscribed square so Generative Retouch stays enabled.
+    let (w, h) = (b.width(), b.height());
+    if w != h {
+        if w.abs_diff(h) != 1 {
+            return Err(format!("the selection must be square (it is {w}×{h})"));
+        }
+        let side = w.min(h);
+        b = Rect::from_xywh(b.x0, b.y0, side, side);
     }
     if !doc.bounds().contains_rect(&b) {
         return Err("the square selection must lie entirely on the canvas".into());
@@ -449,7 +456,10 @@ mod http {
     }
 
     fn unreachable_backend(origin: &Origin, detail: &str) -> EngineError {
-        EngineError::Other(format!("could not reach the retouch backend at {}. Start it with `cargo run -p photocraft-gemini-retouch` ({detail}).", origin.page()))
+        EngineError::Other(format!(
+            "PhotoCraft Retouch is not running at {}. Start it and leave its window open, then try again ({detail}).",
+            origin.page()
+        ))
     }
 
     fn read_response(stream: &mut TcpStream) -> std::io::Result<Response> {
@@ -736,6 +746,10 @@ mod tests {
         assert!(s.execute(SEND, json!({})).is_err(), "a rectangle is not a square");
         s.execute("select.rect", json!({"x": 1, "y": 2, "width": 4, "height": 4})).unwrap();
         assert!(s.is_enabled(SEND));
+        // One pixel of rounding (a 1:1 drag that did not land on a pixel boundary) still counts.
+        s.execute("select.rect", json!({"x": 1, "y": 1, "width": 5, "height": 4})).unwrap();
+        assert!(s.is_enabled(SEND), "a selection one pixel off a square stays enabled");
+        assert_eq!(square(&s.active().unwrap().doc).unwrap().size(), photocraft_geom::Size::new(4, 4));
         assert!(s.execute(SEND, json!({"prompt": 1, "url": "http://127.0.0.1:9", "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": false, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": "https://example.com", "open": false})).is_err());
@@ -758,6 +772,44 @@ mod tests {
         assert!(corner[1] > 0.9 && corner[3] > 0.9, "scaled to the whole square {corner:?}");
         let outside = layer_px(&s, 0, 0);
         assert!(outside[3] < 0.05, "outside the selection stays empty {outside:?}");
+        assert_eq!(s.active().unwrap().doc.layers.len(), 2);
+    }
+
+    #[test]
+    fn a_generated_layer_does_not_block_another_generate() {
+        let backend = mock(solid_png(2, 2, [0, 0, 255]));
+        let mut s = session(8);
+        s.execute("select.rect", json!({"x": 2, "y": 3, "width": 4, "height": 4})).unwrap();
+        s.execute(SEND, json!({"url": backend.addr, "prompt": "remove stray hair", "open": false})).unwrap();
+        assert!(s.is_enabled(SEND), "Edit › Generative Retouch stays available");
+        assert!(s.is_enabled(PLACE));
+        let again = s.execute(SEND, json!({"url": backend.addr, "prompt": "retouch skin", "open": false})).unwrap();
+        assert!(again["layer"].as_u64().is_some());
+        let names: Vec<_> = s
+            .active()
+            .unwrap()
+            .doc
+            .layers
+            .iter()
+            .map(|l| l.name.as_str())
+            .filter(|n| n.starts_with("Generative Retouch"))
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn merging_the_generated_layer_does_not_block_another_generate() {
+        let backend = mock(solid_png(2, 2, [255, 0, 0]));
+        let mut s = session(8);
+        s.execute("select.rect", json!({"x": 2, "y": 3, "width": 4, "height": 4})).unwrap();
+        s.execute(SEND, json!({"url": backend.addr, "prompt": "remove stray hair", "open": false})).unwrap();
+        s.execute("layer.mergeDown", json!({})).unwrap();
+        let doc = &s.active().unwrap().doc;
+        assert_eq!(doc.layers.len(), 1, "the generated layer is merged into the original");
+        assert!(doc.selection.is_some(), "the square selection survives the merge");
+        assert!(s.is_enabled(SEND), "Edit › Generative Retouch stays available");
+        let again = s.execute(SEND, json!({"url": backend.addr, "prompt": "retouch skin", "open": false})).unwrap();
+        assert!(again["layer"].as_u64().is_some());
         assert_eq!(s.active().unwrap().doc.layers.len(), 2);
     }
 

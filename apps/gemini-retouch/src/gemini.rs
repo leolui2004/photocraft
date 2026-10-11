@@ -138,22 +138,26 @@ pub trait Gemini: Send + Sync {
 
 /// Blocking HTTPS client for the interactions API.
 pub struct UreqGemini {
-    api_key: String,
+    keys: std::sync::Arc<crate::key::KeyStore>,
     url: String,
     lang: Lang,
 }
 
 impl UreqGemini {
-    pub fn new(api_key: impl Into<String>, url: impl Into<String>, lang: Lang) -> Self {
-        Self { api_key: api_key.into(), url: url.into(), lang }
+    pub fn new(keys: std::sync::Arc<crate::key::KeyStore>, url: impl Into<String>, lang: Lang) -> Self {
+        Self { keys, url: url.into(), lang }
     }
 }
 
 impl Gemini for UreqGemini {
     fn edit(&self, png: &[u8], side: u32, prompt: &str) -> Result<Vec<u8>, String> {
+        let api_key = self.keys.get();
+        if api_key.is_empty() {
+            return Err(self.lang.err_missing_key().to_string());
+        }
         let body = interaction_body(prompt, png, side);
         let size = image_size_for(side);
-        let response = post_json(&self.url, &self.api_key, &body, size, self.lang)?;
+        let response = post_json(&self.url, &api_key, &body, size, self.lang)?;
         eprintln!("{}", usage_log_line(&response, size, self.lang));
         image_from_response(&response)
     }
@@ -401,7 +405,8 @@ mod tests {
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             std::io::Write::write_all(&mut sock, resp.as_bytes()).unwrap();
         });
-        let client = UreqGemini::new("test-key", format!("http://{addr}/v1beta/interactions"), Lang::En);
+        let keys = std::sync::Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-unused-key"), Some("test-key".into())));
+        let client = UreqGemini::new(keys, format!("http://{addr}/v1beta/interactions"), Lang::En);
         let out = client.edit(png, 1500, "retouch skin").unwrap();
         assert_eq!(out, png);
         handle.join().unwrap();

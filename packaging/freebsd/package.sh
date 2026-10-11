@@ -48,6 +48,8 @@ echo "==> PhotoCraft $VERSION for FreeBSD $ARCH"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 if [ "$SKIP_BUILD" = 0 ]; then
   (cd "$ROOT" && cargo build --release --locked -p photocraft -p photocraft-cli --features heif)
+  # No --features: this package does not have `heif`.
+  (cd "$ROOT" && cargo build --release --locked -p photocraft-gemini-retouch)
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"
@@ -61,7 +63,7 @@ if [ "$DRY_RUN" = 1 ]; then
   BIN="$WORK/stub-bin"
   OUT_DIR="$WORK"
   mkdir -p "$BIN"
-  for b in photocraft photocraft-cli; do
+  for b in photocraft photocraft-cli photocraft-gemini-retouch; do
     printf '#!/bin/sh\necho "%s %s (dry-run stub)"\n' "$b" "$VERSION" >"$BIN/$b"
     chmod 755 "$BIN/$b"
   done
@@ -71,10 +73,11 @@ fi
 # FreeBSD's install(1) has no -D: create the directories first.
 mkdir -p "$STAGE/bin" "$STAGE/share/applications" "$STAGE/share/mime/packages" \
   "$STAGE/share/metainfo" "$STAGE/share/icons" "$STAGE/share/doc/photocraft"
-install -m 755 "$BIN/photocraft" "$BIN/photocraft-cli" "$STAGE/bin/"
-strip "$STAGE/bin/photocraft" "$STAGE/bin/photocraft-cli" 2>/dev/null || true
+install -m 755 "$BIN/photocraft" "$BIN/photocraft-cli" "$BIN/photocraft-gemini-retouch" "$STAGE/bin/"
+strip "$STAGE/bin/photocraft" "$STAGE/bin/photocraft-cli" "$STAGE/bin/photocraft-gemini-retouch" 2>/dev/null || true
 # The desktop entry, MIME type, metainfo and icons are the freedesktop files Linux ships.
 install -m 644 "$LINUX/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
+install -m 644 "$LINUX/$APP_ID.retouch.desktop" "$STAGE/share/applications/$APP_ID.retouch.desktop"
 install -m 644 "$LINUX/$APP_ID.mime.xml" "$STAGE/share/mime/packages/$APP_ID.xml"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$PHOTOCRAFT_BUILD_DATE/g" \
   "$LINUX/$APP_ID.metainfo.xml.in" >"$STAGE/share/metainfo/$APP_ID.metainfo.xml"
@@ -84,7 +87,8 @@ for f in NOTICE ATTRIBUTION.md; do
   if [ -f "$ROOT/$f" ]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/photocraft/"; fi
 done
 
-for f in bin/photocraft bin/photocraft-cli "share/applications/$APP_ID.desktop" \
+for f in bin/photocraft bin/photocraft-cli bin/photocraft-gemini-retouch "share/applications/$APP_ID.desktop" \
+  "share/applications/$APP_ID.retouch.desktop" \
   "share/icons/hicolor/256x256/apps/$APP_ID.png" "share/icons/hicolor/scalable/apps/$APP_ID.svg" \
   share/doc/photocraft/LICENSE-MIT share/doc/photocraft/LICENSE-APACHE; do
   if [ ! -e "$STAGE/$f" ]; then echo "error: $f is missing from the package" >&2; exit 1; fi

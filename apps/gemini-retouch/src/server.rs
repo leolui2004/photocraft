@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::gemini::{self, Gemini};
+use crate::key::KeyStore;
 use crate::lang::Lang;
 
 const MAX_BODY: usize = 12 * 1024 * 1024;
@@ -86,18 +87,20 @@ impl Drop for Server {
 }
 
 /// Bind `addr` and serve until the returned value is dropped.
-pub fn start(addr: SocketAddr, gemini: Arc<dyn Gemini>, lang: Lang) -> Result<Server, String> {
+pub fn start(addr: SocketAddr, gemini: Arc<dyn Gemini>, keys: Arc<KeyStore>, lang: Lang) -> Result<Server, String> {
     let listener = TcpListener::bind(addr).map_err(|e| lang.err_listen(&addr, &e))?;
     listener.set_nonblocking(false).map_err(|e| lang.err_listen(&addr, &e))?;
     let bound = listener.local_addr().map_err(|e| lang.err_listen(&addr, &e))?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let thread =
-        std::thread::Builder::new().name("retouch-http".into()).spawn(move || accept_loop(listener, gemini, flag, lang)).map_err(|e| lang.err_thread(&e))?;
+    let thread = std::thread::Builder::new()
+        .name("retouch-http".into())
+        .spawn(move || accept_loop(listener, gemini, keys, flag, lang))
+        .map_err(|e| lang.err_thread(&e))?;
     Ok(Server { addr: bound, shutdown, thread: Some(thread) })
 }
 
-fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, shutdown: Arc<AtomicBool>, lang: Lang) {
+fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, keys: Arc<KeyStore>, shutdown: Arc<AtomicBool>, lang: Lang) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -116,9 +119,10 @@ fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, shutdown: Arc<Ato
             break;
         }
         let gemini = Arc::clone(&gemini);
+        let keys = Arc::clone(&keys);
         let req_lang = lang;
         let _ = std::thread::Builder::new().name("retouch-req".into()).spawn(move || {
-            if let Err(e) = handle(sock, gemini.as_ref()) {
+            if let Err(e) = handle(sock, gemini.as_ref(), keys.as_ref()) {
                 let kind = e.kind();
                 if kind != std::io::ErrorKind::UnexpectedEof && kind != std::io::ErrorKind::ConnectionAborted && kind != std::io::ErrorKind::ConnectionReset {
                     eprintln!("{}", req_lang.log_backend(&e));
@@ -128,7 +132,7 @@ fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, shutdown: Arc<Ato
     }
 }
 
-fn handle(mut sock: TcpStream, gemini: &dyn Gemini) -> std::io::Result<()> {
+fn handle(mut sock: TcpStream, gemini: &dyn Gemini, keys: &KeyStore) -> std::io::Result<()> {
     let _ = sock.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(30)));
     let req = match read_request(&mut sock) {
@@ -138,7 +142,7 @@ fn handle(mut sock: TcpStream, gemini: &dyn Gemini) -> std::io::Result<()> {
             return Ok(());
         }
     };
-    let response = route(&req, gemini);
+    let response = route(&req, gemini, keys);
     write_response(&mut sock, response.status, &response.content_type, &response.headers, &response.body)
 }
 
@@ -156,9 +160,11 @@ struct Outgoing {
     body: Vec<u8>,
 }
 
-fn route(req: &Incoming, gemini: &dyn Gemini) -> Outgoing {
+fn route(req: &Incoming, gemini: &dyn Gemini, keys: &KeyStore) -> Outgoing {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => html(PAGE),
+        ("GET", "/key-status") => json_out(200, &json!({"set": keys.has_key()})),
+        ("POST", "/api-key") => save_key(req, keys),
         ("GET", "/status") => json_out(200, &state().status()),
         ("GET", "/selection.png") => selection_png(),
         ("GET", "/result") => result_png(),
@@ -224,6 +230,21 @@ fn result_png() -> Outgoing {
     match &g.result {
         Some(f) => png_out(&f.png, f),
         None => text(404, "no retouch result yet; enter a prompt and send it"),
+    }
+}
+
+fn save_key(req: &Incoming, keys: &KeyStore) -> Outgoing {
+    let raw = if req.content_type.starts_with("application/json") {
+        match serde_json::from_slice::<Value>(&req.body) {
+            Ok(v) => v.get("key").and_then(Value::as_str).unwrap_or("").to_string(),
+            Err(_) => return text(400, "the body must be JSON"),
+        }
+    } else {
+        form_value(&req.body, "key").unwrap_or_default()
+    };
+    match keys.set(&raw) {
+        Ok(()) => json_out(200, &json!({"ok": true})),
+        Err(e) => text(400, &e),
     }
 }
 
@@ -506,6 +527,9 @@ const PAGE: &str = r#"<!DOCTYPE html>
   button { font: inherit; padding: 8px 14px; border: 1px solid #555; background: #2a2a2a; color: inherit; cursor: pointer; }
   button.primary { background: #3d6df2; border-color: #3d6df2; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }
+  input { flex: 1; min-width: 12em; font: inherit; padding: 8px 10px; background: #111; color: inherit; border: 1px solid #444; }
+  #keybox { margin: 0 0 18px; padding: 12px 14px; border: 1px solid #444; }
+  a { color: #9eb6ff; }
   #status { margin-top: 14px; min-height: 1.4em; }
   .err { color: #ff8a80; }
   .ok { color: #9ccc9c; }
@@ -515,6 +539,13 @@ const PAGE: &str = r#"<!DOCTYPE html>
 <main>
   <h1>PhotoCraft retouch</h1>
   <p>Select a square in PhotoCraft and choose Edit › Generative Retouch. Then describe the change and send it. When this page says the image is ready, choose Edit › Place Generative Result.</p>
+  <div id="keybox" hidden>
+    <p>Paste the API key from <a href="https://aistudio.google.com/apikey">Google AI Studio</a>. It stays on this computer. PhotoCraft never sees it.</p>
+    <div class="row">
+      <input id="apikey" type="password" autocomplete="off" spellcheck="false" placeholder="API key">
+      <button type="button" class="primary" id="savekey">Save key</button>
+    </div>
+  </div>
   <div id="preview" class="empty">No selection yet.</div>
   <textarea id="prompt" placeholder="remove stray hair"></textarea>
   <div class="row">
@@ -529,13 +560,34 @@ const prompt = document.getElementById("prompt");
 const status = document.getElementById("status");
 const preview = document.getElementById("preview");
 const send = document.getElementById("send");
+const keybox = document.getElementById("keybox");
+const apikey = document.getElementById("apikey");
+let keySet = false;
 document.getElementById("hair").onclick = () => { prompt.value = "remove stray hair"; };
 document.getElementById("skin").onclick = () => { prompt.value = "retouch skin"; };
+document.getElementById("savekey").onclick = async () => {
+  note("Saving the key…");
+  try {
+    const res = await fetch("/api-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: apikey.value }) });
+    const msg = await res.json();
+    if (!res.ok) { note(msg.error || "Could not save the key.", "err"); return; }
+    apikey.value = "";
+    note("API key saved on this computer.", "ok");
+    refresh();
+  } catch (e) {
+    note("Could not reach the backend.", "err");
+  }
+};
 function note(text, cls) { status.textContent = text; status.className = cls || ""; }
 async function refresh() {
   let info;
   try { info = await (await fetch("/status")).json(); }
   catch (e) { note("Could not reach the backend.", "err"); return; }
+  try {
+    const keyInfo = await (await fetch("/key-status")).json();
+    keySet = !!keyInfo.set;
+    keybox.hidden = keySet;
+  } catch (e) { /* the prompt page still works; Send will say if the key is missing */ }
   if (info.state === "waiting" || info.state === "ready" || info.state === "generating" || info.state === "error") {
     if (!preview.querySelector("img")) {
       const img = document.createElement("img");
@@ -550,8 +602,9 @@ async function refresh() {
   else if (info.state === "ready") note("Ready. In PhotoCraft, choose Edit › Place Generative Result.", "ok");
   else if (info.state === "error") note(info.error || "The retouch failed.", "err");
   else if (info.state === "waiting") note("Selection received (" + info.width + "×" + info.height + ", output " + info.imageSize + "). Enter a prompt and send.");
-  else note("");
-  send.disabled = info.state === "generating" || info.state === "empty";
+  else if (!keySet) note("Paste your Gemini API key above. It is saved on this computer.");
+  else if (status.className !== "ok") note("");
+  send.disabled = !keySet || info.state === "generating" || info.state === "empty";
 }
 send.onclick = async () => {
   send.disabled = true;
@@ -627,7 +680,8 @@ mod tests {
         }
         let png = one_pixel();
         let fake = Arc::new(Fake { png: png.clone(), seen: Mutex::new(None) });
-        let server = start("127.0.0.1:0".parse().unwrap(), fake.clone(), Lang::En).unwrap();
+        let keys = Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-unused-key"), Some("present".into())));
+        let server = start("127.0.0.1:0".parse().unwrap(), fake.clone(), keys, Lang::En).unwrap();
         let addr = server.addr;
 
         let (status, page, _) = exchange(addr, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
@@ -659,6 +713,25 @@ mod tests {
         let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
         assert_eq!(seen, (1, "remove stray hair".into()));
 
+        // A finished result must not disable Send. The page only disables it with no key,
+        // while a retouch is running, or before any selection has arrived.
+        let (status, head, status_body) = exchange(addr, "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200, "{head}");
+        let status_json: Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["state"], "ready");
+        assert!(PAGE.contains(r#"send.disabled = !keySet || info.state === "generating" || info.state === "empty""#));
+
+        let prompt_body = r#"{"prompt":"retouch skin"}"#;
+        let posted = format!(
+            "POST /generate HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let (status, head, body) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        assert_eq!(body, png);
+        let seen = fake.seen.lock().unwrap_or_else(PoisonError::into_inner).clone().unwrap();
+        assert_eq!(seen, (1, "retouch skin".into()));
+
         let (status, _, again) = exchange(addr, "GET /result HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert_eq!(status, 200);
         assert_eq!(again, png);
@@ -670,5 +743,43 @@ mod tests {
         );
         let (status, _, _) = exchange(addr, &posted);
         assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn the_page_saves_an_api_key_without_repeating_it() {
+        let dir = std::env::temp_dir().join(format!("photocraft-retouch-http-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gemini-api-key.txt");
+        let keys = Arc::new(crate::key::KeyStore::open(path.clone(), Some(String::new())));
+        let fake = Arc::new(Fake { png: Vec::new(), seen: Mutex::new(None) });
+        let server = start("127.0.0.1:0".parse().unwrap(), fake, Arc::clone(&keys), Lang::En).unwrap();
+
+        let (status, page, _) = exchange(server.addr, "GET /key-status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("\"set\":false"), "{page}");
+
+        let secret = "AIzaSyExampleKey123";
+        let body = format!(r#"{{"key":"{secret}"}}"#);
+        let posted = format!(
+            "POST /api-key HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, head, resp) = exchange(server.addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        let text = String::from_utf8_lossy(&resp);
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("\"ok\":true"), "{text}");
+        assert_eq!(keys.get(), secret);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), secret);
+
+        let spaced = r#"{"key":"not a key"}"#;
+        let posted = format!(
+            "POST /api-key HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{spaced}",
+            spaced.len()
+        );
+        let (status, _, _) = exchange(server.addr, &posted);
+        assert_eq!(status, 400);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -43,6 +43,8 @@ echo "==> PhotoCraft $VERSION for Linux $ARCH ($FORMATS)"
 
 if [ "$SKIP_BUILD" = 0 ]; then
   (cd "$ROOT" && cargo build --release --locked -p photocraft -p photocraft-cli --features heif)
+  # No --features: this package does not have `heif`.
+  (cd "$ROOT" && cargo build --release --locked -p photocraft-gemini-retouch)
 fi
 BIN="$CARGO_TARGET_DIR/release"
 WORK="$CARGO_TARGET_DIR/linux-package"
@@ -52,8 +54,10 @@ rm -rf "$WORK"
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
 install -Dm755 "$BIN/photocraft" "$STAGE/usr/bin/photocraft"
 install -Dm755 "$BIN/photocraft-cli" "$STAGE/usr/bin/photocraft-cli"
-strip "$STAGE/usr/bin/photocraft" "$STAGE/usr/bin/photocraft-cli" 2>/dev/null || true
+install -Dm755 "$BIN/photocraft-gemini-retouch" "$STAGE/usr/bin/photocraft-gemini-retouch"
+strip "$STAGE/usr/bin/photocraft" "$STAGE/usr/bin/photocraft-cli" "$STAGE/usr/bin/photocraft-gemini-retouch" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
+install -Dm644 "$HERE/$APP_ID.retouch.desktop" "$STAGE/usr/share/applications/$APP_ID.retouch.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$PHOTOCRAFT_BUILD_DATE/g" \
@@ -65,6 +69,7 @@ copy_docs "$STAGE/usr/share/doc/photocraft"
 
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.desktop"
+  desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.retouch.desktop"
 fi
 if command -v appstreamcli >/dev/null; then
   appstreamcli validate --no-net --explain "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"

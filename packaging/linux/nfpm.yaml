@@ -20,7 +20,8 @@ description: |-
   Open-source, native image editor that works the way Photoshop users expect.
   Layers, masks, adjustment layers, layer styles, type and brushes; opens and
   saves layered PSD/PSB files; 8/16/32-bit documents; GPU compositing (wgpu).
-  Includes photocraft-cli, a headless converter and command runner.
+  Includes photocraft-cli, a headless converter and command runner, and
+  photocraft-gemini-retouch, the local helper for generative retouch.
 
 # The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
 # GPU (Vulkan, EGL/GL) are loaded at runtime with dlopen, so they aren't ELF NEEDED entries and
@@ -71,6 +72,9 @@ contents:
     file_info: { mode: 0755 }
   - src: ${STAGE}/usr/bin/photocraft-cli
     dst: /usr/bin/photocraft-cli
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/bin/photocraft-gemini-retouch
+    dst: /usr/bin/photocraft-gemini-retouch
     file_info: { mode: 0755 }
   - src: ${STAGE}/usr/share/
     dst: /usr/share/

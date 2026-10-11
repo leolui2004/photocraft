@@ -328,7 +328,7 @@ jobs:
             export CRAFT_FONTS_DIR="$PWD/craft-fonts" CRAFT_FONTS_REQUIRED=1
             bash packaging/freebsd/package.sh
             tar -tzf dist/release/photocraft-*-freebsd-x86_64.tar.gz \
-              | grep -E '/bin/photocraft$|/bin/photocraft-cli$|/share/applications/ai\.storyteller\.photocraft\.desktop$|/share/doc/photocraft/LICENSE-MIT$'
+              | grep -E '/bin/photocraft$|/bin/photocraft-cli$|/bin/photocraft-gemini-retouch$|/share/applications/ai\.storyteller\.photocraft\.desktop$|/share/doc/photocraft/LICENSE-MIT$'
       - uses: actions/upload-artifact@v4
         with:
           name: release-freebsd-x86_64

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PhotoCraft Retouch
+GenericName=PhotoCraft Retouch
+Comment=Start the helper PhotoCraft uses for generative retouch. Leave this window open.
+Exec=photocraft-gemini-retouch
+TryExec=photocraft-gemini-retouch
+Icon=ai.storyteller.photocraft
+Terminal=true
+Categories=Graphics;
+Keywords=photo;retouch;gemini;
