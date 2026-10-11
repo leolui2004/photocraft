@@ -2717,3 +2717,6 @@ cameraRaw	Color	색상
 	% of all commits	전체 커밋 대비 %
 	Lines +/−	줄 +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR {prs}개, 커밋 {commits}개, 줄 +{added} / −{deleted} (Δ {delta}), 바이너리 +{binAdded} / −{binDeleted}, {first} – {last}
+	Generative Retouch	생성형 리터칭
+	Place Generative Result	생성 결과 배치
+	Enter the retouch prompt at {page}, then {menu} › {command}	{page}에서 리터칭 프롬프트를 입력한 다음 {menu} › {command}를 선택하세요

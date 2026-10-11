@@ -1,6 +1,6 @@
-//! Operator-facing log language. English is the default. Japanese and Traditional Chinese
-//! cover the same stderr lines. HTTP responses and the prompt page stay in English, because
-//! PhotoCraft and agents match those strings.
+//! Operator-facing language. English is the default. Japanese and Traditional Chinese cover the
+//! same stderr lines and the prompt page. HTTP JSON stays in English, because PhotoCraft and
+//! agents match those strings.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Lang {
@@ -27,6 +27,9 @@ pub struct Options {
     pub help: bool,
     /// Open the prompt page in a browser once the server is listening.
     pub open_browser: bool,
+    /// Open that page after the first selection is stored, instead of at startup.
+    /// PhotoCraft passes this so the page's first view already shows the square.
+    pub open_on_selection: bool,
 }
 
 /// `--lang en|ja|zh-Hant`. Unknown flags are an error so a typo is not a silent English log.
@@ -34,6 +37,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
     let mut lang = Lang::En;
     let mut help = false;
     let mut open_browser = true;
+    let mut open_on_selection = false;
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_ref();
@@ -41,6 +45,8 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
             help = true;
         } else if arg == "--no-browser" {
             open_browser = false;
+        } else if arg == "--open-on-selection" {
+            open_on_selection = true;
         } else if arg == "--lang" || arg == "--language" {
             i += 1;
             let Some(value) = args.get(i).map(|s| s.as_ref()) else {
@@ -54,7 +60,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         }
         i += 1;
     }
-    Ok(Options { lang, help, open_browser })
+    Ok(Options { lang, help, open_browser, open_on_selection })
 }
 
 fn parse_lang_code(raw: &str) -> Result<Lang, ()> {
@@ -76,38 +82,55 @@ fn parse_lang_code(raw: &str) -> Result<Lang, ()> {
 }
 
 impl Lang {
+    /// `en`, `ja`, or `zh-Hant`. Unknown text is `None` (a typo must not become a silent English page).
+    pub fn from_code(raw: &str) -> Option<Self> {
+        parse_lang_code(raw).ok()
+    }
+
+    /// Path segment used when opening the prompt page (`/ja`).
+    pub fn page_code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ja => "ja",
+            Lang::ZhHant => "zh-Hant",
+        }
+    }
+
     pub fn help(self) -> &'static str {
         match self {
             Lang::En => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selection]
 
-  (default)          English logs, and a browser window
-  --lang ja          Japanese logs
-  --lang zh-Hant     Traditional Chinese logs
+  (default)          English logs and prompt page, and a browser window
+  --lang ja          Japanese logs and prompt page
+  --lang zh-Hant     Traditional Chinese logs and prompt page
   --no-browser       Do not open a browser
+  --open-on-selection  Open the browser after the first selection arrives
   --help             Show this help
 "
             }
             Lang::Ja => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selection]
 
-  （既定）           英語のログとブラウザ
-  --lang ja          日本語のログ
-  --lang zh-Hant     繁体字中国語のログ
+  （既定）           英語のログとプロンプトページ、およびブラウザ
+  --lang ja          日本語のログとプロンプトページ
+  --lang zh-Hant     繁体字中国語のログとプロンプトページ
   --no-browser       ブラウザを開かない
+  --open-on-selection  最初の選択範囲が届いてからブラウザを開く
   --help             このヘルプを表示
 "
             }
             Lang::ZhHant => {
                 "\
-photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
+photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser] [--open-on-selection]
 
-  （預設）           英文日誌，並開啟瀏覽器
-  --lang ja          日文日誌
-  --lang zh-Hant     繁體中文日誌
+  （預設）           英文日誌與提示頁，並開啟瀏覽器
+  --lang ja          日文日誌與提示頁
+  --lang zh-Hant     繁體中文日誌與提示頁
   --no-browser       不要開啟瀏覽器
+  --open-on-selection  第一次收到選取範圍後再開啟瀏覽器
   --help             顯示此說明
 "
             }
@@ -125,8 +148,8 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
     pub fn banner_howto(self) -> &'static str {
         match self {
             Lang::En => "Square selection in PhotoCraft, then Edit › Generative Retouch. Enter the prompt on this page.",
-            Lang::Ja => "PhotoCraft で正方形を選択し、Edit › Generative Retouch を選んでください。プロンプトはこのページに入力します。",
-            Lang::ZhHant => "請在 PhotoCraft 中框選正方形，然後選擇 Edit › Generative Retouch。請在此頁面輸入提示。",
+            Lang::Ja => "PhotoCraft で正方形を選択し、編集 › 生成レタッチ を選んでください。プロンプトはこのページに入力します。",
+            Lang::ZhHant => "請在 PhotoCraft 中框選正方形，然後選擇「編輯 › 生成式潤飾」。請在此頁面輸入提示。",
         }
     }
 
@@ -141,7 +164,9 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
     pub fn err_missing_key(self) -> &'static str {
         match self {
             Lang::En => "Paste a Gemini API key on the PhotoCraft Retouch page and press Save. Get a key at https://aistudio.google.com/apikey",
-            Lang::Ja => "PhotoCraft Retouch のページに Gemini API キーを貼り付けて Save を押してください。キーは https://aistudio.google.com/apikey で取得できます",
+            Lang::Ja => {
+                "PhotoCraft Retouch のページに Gemini API キーを貼り付けて Save を押してください。キーは https://aistudio.google.com/apikey で取得できます"
+            }
             Lang::ZhHant => "請在 PhotoCraft Retouch 頁面貼上 Gemini API 金鑰並按 Save。金鑰可在 https://aistudio.google.com/apikey 取得",
         }
     }
@@ -196,9 +221,9 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
 
     pub fn err_unknown_arg(self, arg: &str) -> String {
         match self {
-            Lang::En => format!("unknown argument `{arg}` (expected --lang en|ja|zh-Hant or --no-browser)"),
-            Lang::Ja => format!("不明な引数 `{arg}` です（--lang en|ja|zh-Hant または --no-browser を指定してください）"),
-            Lang::ZhHant => format!("不明的參數 `{arg}`（請使用 --lang en|ja|zh-Hant 或 --no-browser）"),
+            Lang::En => format!("unknown argument `{arg}` (expected --lang en|ja|zh-Hant, --no-browser, or --open-on-selection)"),
+            Lang::Ja => format!("不明な引数 `{arg}` です（--lang en|ja|zh-Hant、--no-browser、または --open-on-selection を指定してください）"),
+            Lang::ZhHant => format!("不明的參數 `{arg}`（請使用 --lang en|ja|zh-Hant、--no-browser 或 --open-on-selection）"),
         }
     }
 
@@ -273,6 +298,114 @@ photocraft-gemini-retouch [--lang en|ja|zh-Hant] [--no-browser]
             },
         }
     }
+
+    /// Copy for the prompt page. Japanese and Traditional Chinese menu names match PhotoCraft's catalogs.
+    pub fn page(self) -> PageText {
+        match self {
+            Lang::En => PageText {
+                html_lang: "en",
+                title: "PhotoCraft retouch",
+                intro: "Select a square in PhotoCraft and choose Edit › Generative Retouch. Then describe the change and send it. When this page says the image is ready, choose Edit › Place Generative Result.",
+                key_before: "Paste the API key from ",
+                key_link: "Google AI Studio",
+                key_after: ". It stays on this computer. PhotoCraft never sees it.",
+                api_key: "API key",
+                save_key: "Save key",
+                empty: "No selection yet.",
+                prompt_hint: "remove stray hair",
+                hair: "Remove stray hair",
+                skin: "Retouch skin",
+                send: "Send",
+                saving: "Saving the key…",
+                save_failed: "Could not save the key.",
+                saved: "API key saved on this computer.",
+                unreachable: "Could not reach the backend.",
+                alt: "Selected square",
+                sending: "Sending to Gemini…",
+                ready: "Ready. In PhotoCraft, choose Edit › Place Generative Result.",
+                failed: "The retouch failed.",
+                received: "Selection received ({w}×{h}, output {size}). Enter a prompt and send.",
+                need_key: "Paste your Gemini API key above. It is saved on this computer.",
+            },
+            Lang::Ja => PageText {
+                html_lang: "ja",
+                title: "PhotoCraft レタッチ",
+                intro: "PhotoCraft で正方形を選択し、編集 › 生成レタッチ を選んでください。変更内容を書いて送信します。このページに準備ができた表示が出たら、編集 › 生成結果を配置 を選んでください。",
+                key_before: "",
+                key_link: "Google AI Studio",
+                key_after: " の API キーを貼り付けてください。キーはこのパソコンに保存され、PhotoCraft には渡りません。",
+                api_key: "API キー",
+                save_key: "キーを保存",
+                empty: "まだ選択範囲がありません。",
+                prompt_hint: "余計な髪を消す",
+                hair: "余計な髪を消す",
+                skin: "肌をレタッチ",
+                send: "送信",
+                saving: "キーを保存しています…",
+                save_failed: "キーを保存できませんでした。",
+                saved: "API キーをこのパソコンに保存しました。",
+                unreachable: "バックエンドに接続できませんでした。",
+                alt: "選択した正方形",
+                sending: "Gemini に送信しています…",
+                ready: "準備ができました。PhotoCraft の編集 › 生成結果を配置 を選んでください。",
+                failed: "レタッチに失敗しました。",
+                received: "選択範囲を受け取りました（{w}×{h}、出力 {size}）。プロンプトを入力して送信してください。",
+                need_key: "上の欄に Gemini API キーを貼り付けてください。このパソコンに保存されます。",
+            },
+            Lang::ZhHant => PageText {
+                html_lang: "zh-Hant",
+                title: "PhotoCraft 潤飾",
+                intro: "請在 PhotoCraft 中框選正方形，然後選擇「編輯 › 生成式潤飾」。描述要做的修改並傳送。此頁面顯示影像已就緒時，請選擇「編輯 › 置入生成結果」。",
+                key_before: "請貼上 ",
+                key_link: "Google AI Studio",
+                key_after: " 的 API 金鑰。金鑰只留在這台電腦上，PhotoCraft 不會看到。",
+                api_key: "API 金鑰",
+                save_key: "儲存金鑰",
+                empty: "尚未收到選取範圍。",
+                prompt_hint: "去除多餘的頭髮",
+                hair: "去除多餘的頭髮",
+                skin: "潤飾皮膚",
+                send: "傳送",
+                saving: "正在儲存金鑰…",
+                save_failed: "無法儲存金鑰。",
+                saved: "已將 API 金鑰儲存在這台電腦上。",
+                unreachable: "無法連線到後端。",
+                alt: "選取的正方形",
+                sending: "正在傳送到 Gemini…",
+                ready: "已就緒。請在 PhotoCraft 選擇「編輯 › 置入生成結果」。",
+                failed: "潤飾失敗。",
+                received: "已收到選取範圍（{w}×{h}，輸出 {size}）。請輸入提示並傳送。",
+                need_key: "請在上方貼上 Gemini API 金鑰。金鑰會儲存在這台電腦上。",
+            },
+        }
+    }
+}
+
+/// Strings the prompt page shows. `{w}`, `{h}` and `{size}` in [`PageText::received`] are filled in by the page.
+pub struct PageText {
+    pub html_lang: &'static str,
+    pub title: &'static str,
+    pub intro: &'static str,
+    pub key_before: &'static str,
+    pub key_link: &'static str,
+    pub key_after: &'static str,
+    pub api_key: &'static str,
+    pub save_key: &'static str,
+    pub empty: &'static str,
+    pub prompt_hint: &'static str,
+    pub hair: &'static str,
+    pub skin: &'static str,
+    pub send: &'static str,
+    pub saving: &'static str,
+    pub save_failed: &'static str,
+    pub saved: &'static str,
+    pub unreachable: &'static str,
+    pub alt: &'static str,
+    pub sending: &'static str,
+    pub ready: &'static str,
+    pub failed: &'static str,
+    pub received: &'static str,
+    pub need_key: &'static str,
 }
 
 #[cfg(test)]
@@ -285,7 +418,13 @@ mod tests {
         assert_eq!(opts.lang, Lang::En);
         assert!(!opts.help);
         assert!(opts.open_browser);
+        assert!(!opts.open_on_selection);
         assert!(!parse_args(&["--no-browser"]).unwrap().open_browser);
+        let delayed = parse_args(&["--lang", "ja", "--open-on-selection"]).unwrap();
+        assert_eq!(delayed.lang, Lang::Ja);
+        assert!(delayed.open_browser);
+        assert!(delayed.open_on_selection);
+        assert!(!parse_args(&["--no-browser", "--open-on-selection"]).unwrap().open_browser);
 
         assert_eq!(parse_args(&["--lang", "ja"]).unwrap().lang, Lang::Ja);
         assert_eq!(parse_args(&["--language", "japanese"]).unwrap().lang, Lang::Ja);
@@ -316,5 +455,20 @@ mod tests {
         assert_eq!(Lang::ZhHant.usage_label(UsageLabel::Total), "總計");
         assert!(Lang::Ja.help().contains("日本語のログ"));
         assert!(Lang::ZhHant.help().contains("繁體中文日誌"));
+        assert_eq!(Lang::from_code("ja"), Some(Lang::Ja));
+        assert_eq!(Lang::from_code("zh-hant"), Some(Lang::ZhHant));
+        assert_eq!(Lang::Ja.page_code(), "ja");
+        assert!(Lang::Ja.page().empty.contains("選択範囲"));
+        assert!(Lang::Ja.page().received.contains("{w}"));
+        assert!(Lang::ZhHant.page().title.contains("潤飾"));
+        assert!(!Lang::Ja.page().intro.contains("Select a square"));
+        assert!(Lang::Ja.page().intro.contains("生成レタッチ"));
+        assert!(Lang::Ja.page().ready.contains("生成結果を配置"));
+        assert!(Lang::Ja.banner_howto().contains("生成レタッチ"));
+        assert!(Lang::ZhHant.page().intro.contains("生成式潤飾"));
+        assert!(Lang::ZhHant.page().ready.contains("置入生成結果"));
+        assert!(Lang::ZhHant.banner_howto().contains("生成式潤飾"));
+        assert!(!Lang::Ja.page().intro.contains("Generative Retouch"));
+        assert!(!Lang::ZhHant.page().ready.contains("Place Generative Result"));
     }
 }

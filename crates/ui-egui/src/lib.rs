@@ -261,6 +261,7 @@ pub struct Services {
     /// Open a URL in the system browser (native). Falls back to `ctx.open_url` (web) when unset.
     pub open_url: Option<OpenUrlFn>,
     /// Start the local retouch helper when it is installed and not already listening (desktop).
+    /// The helper does not open a browser. This shell opens one page after the selection upload.
     pub ensure_retouch: Option<Box<dyn Fn() -> Result<(), String>>>,
     /// Files delivered asynchronously (web file pickers, drag-and-drop): drained every frame.
     pub inbox: Option<Inbox>,
@@ -648,7 +649,12 @@ impl PhotocraftApp {
         // Long commands become background jobs when enabled (`jobs_ui`); the rest run inline.
         let params = self.with_mask_target(id, params);
         // The desktop app starts PhotoCraft Retouch when the user asks for a retouch and it is
-        // installed beside the app. The helper holds the API key; this only launches it.
+        // installed beside the app. The helper holds the API key and does not open a browser.
+        // This shell opens exactly one prompt page after the selection upload, with the system
+        // URL opener. Opening from the helper as well (or with `cmd /c start` while its new
+        // console is still attaching) leaves the first click as a console only, and the next
+        // click opens two copies of the page.
+        let shell_opens = id == "edit.generativeRetouch" && retouch_shell_opens(&params, self.services.open_url.is_some());
         let ensured = if id == "edit.generativeRetouch" {
             match self.services.ensure_retouch.as_ref() {
                 Some(ensure) => ensure(),
@@ -656,6 +662,11 @@ impl PhotocraftApp {
             }
         } else {
             Ok(())
+        };
+        let (params, shell_opens) = if id == "edit.generativeRetouch" && ensured.is_ok() {
+            attach_retouch_launch(params, shell_opens)
+        } else {
+            (params, false)
         };
         let r = match ensured {
             Ok(()) => jobs_ui::run(self, id, params),
@@ -674,13 +685,21 @@ impl PhotocraftApp {
                     self.ui.status.clear();
                     self.ui.status_error = false;
                 }
-                // The prompt is typed on the retouch backend. Say where, in case the browser did not open.
+                // The prompt is typed on the retouch backend. Open that page once, from here.
                 if id == "edit.generativeRetouch"
                     && v.get("awaitingPrompt").and_then(Value::as_bool) == Some(true)
                     && let Some(page) = v.get("page").and_then(Value::as_str)
                 {
-                    self.ui.status = format!("Enter the retouch prompt at {page}, then Edit › Place Generative Result");
-                    self.ui.status_error = false;
+                    if shell_opens
+                        && let Some(open) = self.services.open_url.as_ref()
+                        && let Err(e) = open(page)
+                    {
+                        self.ui.status = format!("Could not open the retouch page ({e}). Open {page}");
+                        self.ui.status_error = true;
+                    } else {
+                        self.ui.status = jobs_ui::retouch_prompt_status(page);
+                        self.ui.status_error = false;
+                    }
                 }
             }
             Err(e) => {
@@ -693,7 +712,39 @@ impl PhotocraftApp {
         }
         r
     }
+}
 
+/// The desktop shell opens the prompt page. A caller who passed `open: false`, or a prompt
+/// that runs Gemini inside the command, does not get a browser. Without a URL opener (tests,
+/// the web build) the engine's own opener stays in charge.
+fn retouch_shell_opens(params: &Value, has_open_url: bool) -> bool {
+    if !has_open_url {
+        return false;
+    }
+    if params.get("prompt").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()) {
+        return false;
+    }
+    params.get("open").and_then(Value::as_bool).unwrap_or(true)
+}
+
+/// Tell the retouch command which prompt-page language to request. When this shell will open
+/// the page, force `open` off so the command does not start a second browser.
+///
+/// The bool is whether this shell should open the page after a successful upload.
+fn attach_retouch_launch(params: Value, shell_opens_page: bool) -> (Value, bool) {
+    let mut params = if params.is_null() { serde_json::json!({}) } else { params };
+    let Some(obj) = params.as_object_mut() else { return (params, false) };
+    if !obj.contains_key("lang") {
+        obj.insert("lang".into(), serde_json::Value::String(i18n::retouch_page_code().to_string()));
+    }
+    if !shell_opens_page {
+        return (params, false);
+    }
+    obj.insert("open".into(), serde_json::Value::Bool(false));
+    (params, true)
+}
+
+impl PhotocraftApp {
     /// Keep one view per document, in tab order: a view and its windows stay with their document
     /// when tabs move (`document.move`) or close.
     pub fn sync_views(&mut self) {
@@ -1628,5 +1679,110 @@ mod clipboard_tests {
         }
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "the OS clipboard is read only on an explicit paste");
         assert!(h.state().session.clipboard.is_none());
+    }
+}
+
+#[cfg(test)]
+mod retouch_launch_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::Duration;
+
+    #[test]
+    fn the_shell_opens_the_page_and_the_command_does_not() {
+        let (params, open) = attach_retouch_launch(serde_json::json!({}), true);
+        assert!(open);
+        assert_eq!(params["open"], false);
+        assert_eq!(params["lang"], i18n::retouch_page_code());
+
+        let (params, open) = attach_retouch_launch(serde_json::json!({"open": false, "lang": "ja"}), false);
+        assert!(!open);
+        assert_eq!(params["open"], false);
+        assert_eq!(params["lang"], "ja");
+
+        assert!(!retouch_shell_opens(&serde_json::json!({"prompt": "retouch skin"}), true));
+        assert!(!retouch_shell_opens(&serde_json::json!({"open": false}), true));
+        assert!(!retouch_shell_opens(&serde_json::json!({}), false));
+        assert!(retouch_shell_opens(&serde_json::Value::Null, true));
+    }
+
+    /// Each Generative Retouch opens one page from the shell. The command itself is told not
+    /// to open one, including on the first click (the helper is not asked to open one either).
+    #[test]
+    fn each_generative_retouch_opens_one_page() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut sock, _)) = listener.accept() else { break };
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") && content_received(&buf) {
+                        break;
+                    }
+                    if buf.len() > 2 * 1024 * 1024 {
+                        break;
+                    }
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let body = br#"{"ok":true}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+                let _ = sock.write_all(body);
+            }
+        });
+
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&opened);
+        let services = Services {
+            ensure_retouch: Some(Box::new(|| Ok(()))),
+            open_url: Some(Box::new(move |url| {
+                record.lock().unwrap_or_else(PoisonError::into_inner).push(url.to_string());
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(Session::new(), services);
+        app.session.execute("file.new", serde_json::json!({"width": 32, "height": 32})).unwrap();
+        app.session.execute("select.rect", serde_json::json!({"x": 2, "y": 2, "width": 8, "height": 8})).unwrap();
+        let url = format!("http://127.0.0.1:{port}");
+        let page = format!("{url}/{}", i18n::retouch_page_code());
+
+        let first = app.run("edit.generativeRetouch", serde_json::json!({"url": url})).unwrap();
+        assert_eq!(first["awaitingPrompt"], true);
+        assert_eq!(first["page"], page);
+        assert_eq!(first["opened"], false, "the command must not open a second browser");
+        assert_eq!(opened.lock().unwrap_or_else(PoisonError::into_inner).as_slice(), [page.as_str()]);
+
+        let second = app.run("edit.generativeRetouch", serde_json::json!({"url": url})).unwrap();
+        assert_eq!(second["opened"], false);
+        assert_eq!(opened.lock().unwrap_or_else(PoisonError::into_inner).as_slice(), [page.as_str(), page.as_str()]);
+
+        let before = opened.lock().unwrap_or_else(PoisonError::into_inner).len();
+        assert!(app.run("edit.generativeRetouch", serde_json::json!({"url": url, "open": false})).is_ok());
+        assert_eq!(opened.lock().unwrap_or_else(PoisonError::into_inner).len(), before, "open: false stays closed");
+    }
+
+    fn content_received(buf: &[u8]) -> bool {
+        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+        let head = std::str::from_utf8(&buf[..end]).unwrap_or("");
+        let len = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") { value.trim().parse::<usize>().ok() } else { None }
+        });
+        match len {
+            Some(n) => buf.len() >= end + 4 + n,
+            None => true,
+        }
     }
 }

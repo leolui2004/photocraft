@@ -2116,3 +2116,6 @@ cameraRaw	Color	カラー
 	% of all commits	全コミットに占める割合 (%)
 	Lines +/−	行数 +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR {prs} 件、コミット {commits} 件、行 +{added} / −{deleted} (Δ {delta})、バイナリ +{binAdded} / −{binDeleted}、{first} – {last}
+	Generative Retouch	生成レタッチ
+	Place Generative Result	生成結果を配置
+	Enter the retouch prompt at {page}, then {menu} › {command}	{page} でレタッチの指示を入力し、{menu} › {command} を選んでください

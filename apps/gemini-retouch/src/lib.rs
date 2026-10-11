@@ -2,8 +2,10 @@
 //!
 //! PhotoCraft sends a square selection here. The prompt is entered on the page this server
 //! hosts (or passed through by an agent), and the server calls Gemini Nano Banana 2.1.
-//! PhotoCraft then fetches the image and places it on a new layer. The API key stays here
-//! (environment, `.env`, or the key saved from the browser page) and never enters the editor.
+//! PhotoCraft then fetches the image and places it on a new layer. The API key stays here and
+//! never enters the editor. A shipped exe (release build, installer, portable zip) only uses the
+//! key the user pasted into the page. Debug builds (`cargo run`) may also read `GEMINI_API_KEY`
+//! from the environment or a `.env` file.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -24,9 +26,10 @@ pub use server::Server;
 
 /// Bind and serve until the process is stopped.
 ///
-/// Logs are English unless `--lang ja` or `--lang zh-Hant` is passed (`--help` lists them).
-/// The browser opens on the prompt page unless `--no-browser` is passed (PhotoCraft passes that,
-/// because it opens the page itself after uploading the selection).
+/// Logs and the prompt page are English unless `--lang ja` or `--lang zh-Hant` is passed
+/// (`--help` lists them). The browser opens on that page unless `--no-browser` is passed.
+/// PhotoCraft passes `--no-browser` and opens one page itself after the square is stored.
+/// `--open-on-selection` delays this process's own browser until the first square arrives.
 pub fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     run_args(&args)
@@ -40,7 +43,11 @@ fn run_args(args: &[impl AsRef<str>]) -> Result<(), String> {
     }
     let cfg = load_config(opts.lang)?;
     let gemini = Arc::new(UreqGemini::new(Arc::clone(&cfg.keys), cfg.gemini_url, opts.lang));
-    let server = server::start(cfg.addr, gemini, Arc::clone(&cfg.keys), opts.lang)?;
+    // The hook is installed before the accept loop runs. PhotoCraft can upload as soon as
+    // the port answers, which is still after this closure exists.
+    let on_first_selection =
+        if opts.open_browser && opts.open_on_selection { Some(Arc::new(|url: String| open_browser(&url)) as server::FirstSelectionHook) } else { None };
+    let server = server::start(cfg.addr, gemini, Arc::clone(&cfg.keys), opts.lang, on_first_selection)?;
     let page = http_origin(server.addr);
     eprintln!("{}", opts.lang.banner_listening(&server.addr));
     eprintln!("{}", opts.lang.banner_howto());
@@ -48,15 +55,15 @@ fn run_args(args: &[impl AsRef<str>]) -> Result<(), String> {
     if !cfg.keys.has_key() {
         eprintln!("{}", opts.lang.err_missing_key());
     }
-    if opts.open_browser {
-        open_browser(&page);
+    if opts.open_browser && !opts.open_on_selection {
+        open_browser(&format!("{page}{}", opts.lang.page_code()));
     }
     loop {
         std::thread::park();
     }
 }
 
-fn http_origin(addr: SocketAddr) -> String {
+pub(crate) fn http_origin(addr: SocketAddr) -> String {
     match addr.ip() {
         IpAddr::V4(ip) => format!("http://{ip}:{}/", addr.port()),
         IpAddr::V6(ip) => format!("http://[{ip}]:{}/", addr.port()),
@@ -85,8 +92,11 @@ struct Config {
 }
 
 fn load_config(lang: lang::Lang) -> Result<Config, String> {
-    let file = read_dotenv();
-    let preset = env_or(&file, "GEMINI_API_KEY").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    // Release builds are what installers and the portable zip ship. They must not open `.env`
+    // or honor `GEMINI_API_KEY`, even when the exe sits inside a developer checkout.
+    let shipped = !cfg!(debug_assertions);
+    let file = dotenv_for_launch(shipped);
+    let preset = developer_api_key(shipped, std::env::var("GEMINI_API_KEY").ok(), &file);
     let keys = Arc::new(KeyStore::load(preset));
     let addr_s = env_or(&file, "RETOUCH_ADDR").unwrap_or_else(|| "127.0.0.1:8787".into());
     let addr: SocketAddr = addr_s.parse().map_err(|_| lang.err_bad_addr(&addr_s))?;
@@ -97,8 +107,26 @@ fn load_config(lang: lang::Lang) -> Result<Config, String> {
     Ok(Config { keys, addr, gemini_url })
 }
 
+/// `.env` is a developer convenience for `cargo run`. A shipped exe gets an empty map and does
+/// not walk parent directories, so a portable copy inside this repo cannot see the checkout's file.
+fn dotenv_for_launch(shipped_exe: bool) -> HashMap<String, String> {
+    if shipped_exe { HashMap::new() } else { read_dotenv() }
+}
+
+/// `None` on a shipped exe: the page asks, and the saved paste is the only key. Debug builds
+/// take the process environment first, then `.env`.
+fn developer_api_key(shipped_exe: bool, process_key: Option<String>, file: &HashMap<String, String>) -> Option<String> {
+    if shipped_exe {
+        return None;
+    }
+    match process_key {
+        Some(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => file.get("GEMINI_API_KEY").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+    }
+}
+
 /// `.env` in the working directory or a parent (so `cargo run -p` from the repo root and from
-/// this crate both find it). Process environment wins over the file.
+/// this crate both find it). Only called for debug builds.
 fn read_dotenv() -> HashMap<String, String> {
     let Ok(mut dir) = std::env::current_dir() else { return HashMap::new() };
     for _ in 0..8 {
@@ -147,6 +175,19 @@ fn env_or(file: &HashMap<String, String>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shipped_exe_ignores_dotenv_and_the_environment() {
+        let mut file = HashMap::new();
+        file.insert("GEMINI_API_KEY".into(), "from-file".into());
+        file.insert("RETOUCH_ADDR".into(), "127.0.0.1:9".into());
+        assert_eq!(developer_api_key(true, Some("from-env".into()), &file), None);
+        assert!(dotenv_for_launch(true).is_empty());
+        assert_eq!(developer_api_key(false, Some("  from-env  ".into()), &file).as_deref(), Some("from-env"));
+        assert_eq!(developer_api_key(false, Some(String::new()), &file).as_deref(), Some("from-file"));
+        assert_eq!(developer_api_key(false, None, &file).as_deref(), Some("from-file"));
+        assert_eq!(env_or(&HashMap::new(), "RETOUCH_ADDR"), None);
+    }
 
     #[test]
     fn env_file_parses_and_skips_comments() {

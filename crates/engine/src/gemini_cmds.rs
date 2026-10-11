@@ -66,6 +66,8 @@ struct Opts {
     origin: Origin,
     prompt: Option<String>,
     open_page: bool,
+    /// Prompt-page language (`ja`, `zh-Hant`). Omitted keeps the server's own page.
+    lang: Option<String>,
 }
 
 struct Origin {
@@ -76,6 +78,13 @@ struct Origin {
 impl Origin {
     fn page(&self) -> String {
         format!("http://{}:{}/", self.host, self.port)
+    }
+
+    fn page_for(&self, lang: Option<&str>) -> String {
+        match lang {
+            Some(code) => format!("http://{}:{}/{code}", self.host, self.port),
+            None => self.page(),
+        }
     }
 }
 
@@ -89,6 +98,9 @@ fn opts(p: &Value) -> Result<Opts> {
     if p.get("open").is_some_and(|v| !v.is_boolean()) {
         return Err(bad("`open` must be a boolean"));
     }
+    if p.get("lang").is_some_and(|v| !v.is_string()) {
+        return Err(bad("`lang` must be a string"));
+    }
     let url = p.get("url").and_then(Value::as_str).unwrap_or(DEFAULT_URL);
     let origin = parse_origin(url).map_err(bad)?;
     let prompt = p.get("prompt").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -96,7 +108,13 @@ fn opts(p: &Value) -> Result<Opts> {
         return Err(bad("the prompt is too long"));
     }
     let open_page = p.get("open").and_then(Value::as_bool).unwrap_or(true);
-    Ok(Opts { origin, prompt, open_page })
+    let lang = p.get("lang").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(code) = &lang
+        && (code.len() > 16 || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return Err(bad("`lang` must be a language code such as ja or zh-Hant"));
+    }
+    Ok(Opts { origin, prompt, open_page, lang })
 }
 
 fn parse_origin(url: &str) -> std::result::Result<Origin, String> {
@@ -147,7 +165,7 @@ fn send(s: &mut Session, p: &Value) -> Result<Value> {
         );
     }
     http::post_selection(&opts.origin, &png, rect)?;
-    let page = opts.origin.page();
+    let page = opts.origin.page_for(opts.lang.as_deref());
     let opened = if opts.open_page { open_page(&page) } else { false };
     Ok(json!({
         "awaitingPrompt": true,
@@ -594,7 +612,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Generative Retouch",
             menu: &["Edit"],
             shortcut: None,
-            params: r##"{"prompt":str? (when set, the backend runs Gemini immediately and the image is placed; when omitted, the selection is uploaded and the prompt is entered at the backend page),"url":"http://127.0.0.1:8787"?,"open":bool=true (open the prompt page when no prompt was given)} — needs a square selection"##,
+            params: r##"{"prompt":str? (when set, the backend runs Gemini immediately and the image is placed; when omitted, the selection is uploaded and the prompt is entered at the backend page),"url":"http://127.0.0.1:8787"?,"open":bool=true (open the prompt page when no prompt was given),"lang":"ja"|"zh-Hant"|"en"? (prompt page language; PhotoCraft passes the interface language)} — needs a square selection"##,
             enabled: enabled_send,
             run: send,
             journal: true,
@@ -751,6 +769,8 @@ mod tests {
         assert!(s.is_enabled(SEND), "a selection one pixel off a square stays enabled");
         assert_eq!(square(&s.active().unwrap().doc).unwrap().size(), photocraft_geom::Size::new(4, 4));
         assert!(s.execute(SEND, json!({"prompt": 1, "url": "http://127.0.0.1:9", "open": false})).is_err());
+        assert!(s.execute(SEND, json!({"lang": "ja/nope", "open": false})).is_err());
+        assert!(s.execute(SEND, json!({"lang": 1, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": false, "open": false})).is_err());
         assert!(s.execute(SEND, json!({"url": "https://example.com", "open": false})).is_err());
         assert!(s.execute(PLACE, json!({"url": "not a url"})).is_err());
@@ -818,9 +838,11 @@ mod tests {
         let backend = mock(solid_png(4, 4, [0, 255, 0]));
         let mut s = session(16);
         s.execute("select.rect", json!({"x": 1, "y": 1, "width": 4, "height": 4})).unwrap();
-        let uploaded = s.execute(SEND, json!({"url": backend.addr, "open": false})).unwrap();
+        let uploaded = s.execute(SEND, json!({"url": backend.addr, "open": false, "lang": "ja"})).unwrap();
         assert_eq!(uploaded["awaitingPrompt"], true);
-        assert!(uploaded["page"].as_str().unwrap_or("").starts_with("http://127.0.0.1:"));
+        let page = uploaded["page"].as_str().unwrap_or("");
+        assert!(page.starts_with("http://127.0.0.1:"), "{page}");
+        assert!(page.ends_with("/ja"), "{page}");
         assert_eq!(s.active().unwrap().doc.layers.len(), 1, "uploading does not add a layer");
         // The page's Send is a POST /generate. The mock answers it the same way the backend does.
         let mut sock = TcpStream::connect(backend.addr.trim_start_matches("http://")).unwrap();

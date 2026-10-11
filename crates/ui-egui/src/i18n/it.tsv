@@ -2205,4 +2205,7 @@ cameraRaw	Amount	Quantità
 	% of all commits	% di tutti i commit
 	Lines +/−	Righe +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PR, {commits} commit, +{added} / −{deleted} righe (Δ {delta}), +{binAdded} / −{binDeleted} risorse binarie, {first} – {last}
+	Generative Retouch	Ritocco generativo
+	Place Generative Result	Inserisci risultato generativo
+	Enter the retouch prompt at {page}, then {menu} › {command}	Inserisci il prompt di ritocco in {page}, poi scegli {menu} › {command}
 	Convert to Layers	Converti in livelli

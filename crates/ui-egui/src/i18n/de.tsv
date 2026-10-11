@@ -2172,3 +2172,6 @@
 	% of all commits	% aller Commits
 	Lines +/−	Zeilen +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PRs, {commits} Commits, +{added} / −{deleted} Zeilen (Δ {delta}), +{binAdded} / −{binDeleted} Binärdateien, {first} – {last}
+	Generative Retouch	Generative Retusche
+	Place Generative Result	Generatives Ergebnis platzieren
+	Enter the retouch prompt at {page}, then {menu} › {command}	Retusche-Anweisung unter {page} eingeben, dann {menu} › {command} wählen

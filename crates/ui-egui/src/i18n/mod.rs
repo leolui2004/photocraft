@@ -225,6 +225,17 @@ pub fn current() -> Lang {
     CURRENT.get()
 }
 
+/// Language code for the retouch prompt page (`en`, `ja`, or `zh-Hant`).
+/// Follows the interface language, which is the system language when the preference is Auto.
+/// Languages the page does not translate yet use English.
+pub fn retouch_page_code() -> &'static str {
+    match current().code() {
+        "ja" => "ja",
+        "zh-hant" => "zh-Hant",
+        _ => "en",
+    }
+}
+
 /// Temporarily draw in another language, restoring the previous one even on unwinding.
 /// Preferences previews use this without changing the saved setting or other dialogs.
 pub fn with_language<R>(lang: Lang, draw: impl FnOnce() -> R) -> R {
@@ -320,6 +331,28 @@ mod tests {
             assert_eq!(lang_from_tag(tag), Some(ID()), "{tag}");
         }
         assert_eq!(ID().name(), "Bahasa Indonesia");
+    }
+
+    #[test]
+    fn generative_retouch_menu_labels_follow_the_ui_language() {
+        for lang in Lang::all().filter(|l| *l != Lang::EN) {
+            for source in ["Generative Retouch", "Place Generative Result"] {
+                assert_ne!(tr(lang, source), source, "{}: {source}", lang.code());
+            }
+        }
+        // The retouch page repeats these two menu names; keep the wording in step with `apps/gemini-retouch`.
+        assert_eq!(tr(JA(), "Generative Retouch"), "生成レタッチ");
+        assert_eq!(tr(JA(), "Place Generative Result"), "生成結果を配置");
+        assert_eq!(tr(ZH(), "Generative Retouch"), "生成式潤飾");
+        assert_eq!(tr(ZH(), "Place Generative Result"), "置入生成結果");
+    }
+
+    #[test]
+    fn the_retouch_page_uses_the_ui_language() {
+        with_language(Lang::from_code("ja").expect("ja"), || assert_eq!(retouch_page_code(), "ja"));
+        with_language(Lang::from_code("zh-hant").expect("zh-hant"), || assert_eq!(retouch_page_code(), "zh-Hant"));
+        with_language(Lang::EN, || assert_eq!(retouch_page_code(), "en"));
+        with_language(Lang::from_code("ko").expect("ko"), || assert_eq!(retouch_page_code(), "en"));
     }
 
     #[test]

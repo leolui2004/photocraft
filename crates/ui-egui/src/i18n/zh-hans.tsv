@@ -2141,3 +2141,6 @@ cameraRaw	Blending	混合
 	% of all commits	占全部提交的 %
 	Lines +/−	行数 +/−
 	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}：{prs} 个 PR，{commits} 次提交，行 +{added} / −{deleted}（Δ {delta}），二进制文件 +{binAdded} / −{binDeleted}，{first} – {last}
+	Generative Retouch	生成式润饰
+	Place Generative Result	置入生成结果
+	Enter the retouch prompt at {page}, then {menu} › {command}	请在 {page} 输入润饰提示，然后选择 {menu} › {command}

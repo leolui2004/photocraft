@@ -18,6 +18,23 @@ use crate::lang::Lang;
 const MAX_BODY: usize = 12 * 1024 * 1024;
 const MAX_PROMPT: usize = 4_000;
 
+/// Called once, with the prompt-page URL, after the first selection is stored.
+/// Installed before the accept loop so a fast upload cannot miss it.
+pub type FirstSelectionHook = Arc<dyn Fn(String) + Send + Sync>;
+
+struct OpenOnce {
+    inner: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl OpenOnce {
+    fn fire(&self) {
+        let hook = self.inner.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Selection {
     png: Vec<u8>,
@@ -41,6 +58,8 @@ struct State {
     result: Option<Finished>,
     generating: bool,
     error: Option<String>,
+    /// Bumps each time a selection is stored, so an open page can replace its preview.
+    revision: u64,
 }
 
 impl State {
@@ -65,6 +84,7 @@ impl State {
             "x": x,
             "y": y,
             "imageSize": self.selection.as_ref().map(|s| gemini::image_size_for(s.width)),
+            "revision": self.revision,
         })
     }
 }
@@ -87,20 +107,29 @@ impl Drop for Server {
 }
 
 /// Bind `addr` and serve until the returned value is dropped.
-pub fn start(addr: SocketAddr, gemini: Arc<dyn Gemini>, keys: Arc<KeyStore>, lang: Lang) -> Result<Server, String> {
+pub fn start(
+    addr: SocketAddr,
+    gemini: Arc<dyn Gemini>,
+    keys: Arc<KeyStore>,
+    lang: Lang,
+    on_first_selection: Option<FirstSelectionHook>,
+) -> Result<Server, String> {
     let listener = TcpListener::bind(addr).map_err(|e| lang.err_listen(&addr, &e))?;
     listener.set_nonblocking(false).map_err(|e| lang.err_listen(&addr, &e))?;
     let bound = listener.local_addr().map_err(|e| lang.err_listen(&addr, &e))?;
+    let page = format!("{}{}", crate::http_origin(bound), lang.page_code());
+    let open_page =
+        Arc::new(OpenOnce { inner: Mutex::new(on_first_selection.map(|hook| Arc::new(move || hook(page.clone())) as Arc<dyn Fn() + Send + Sync>)) });
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
     let thread = std::thread::Builder::new()
         .name("retouch-http".into())
-        .spawn(move || accept_loop(listener, gemini, keys, flag, lang))
+        .spawn(move || accept_loop(listener, gemini, keys, flag, lang, open_page))
         .map_err(|e| lang.err_thread(&e))?;
     Ok(Server { addr: bound, shutdown, thread: Some(thread) })
 }
 
-fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, keys: Arc<KeyStore>, shutdown: Arc<AtomicBool>, lang: Lang) {
+fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, keys: Arc<KeyStore>, shutdown: Arc<AtomicBool>, lang: Lang, open_page: Arc<OpenOnce>) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -121,8 +150,9 @@ fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, keys: Arc<KeyStor
         let gemini = Arc::clone(&gemini);
         let keys = Arc::clone(&keys);
         let req_lang = lang;
+        let open_page = Arc::clone(&open_page);
         let _ = std::thread::Builder::new().name("retouch-req".into()).spawn(move || {
-            if let Err(e) = handle(sock, gemini.as_ref(), keys.as_ref()) {
+            if let Err(e) = handle(sock, gemini.as_ref(), keys.as_ref(), req_lang, &open_page) {
                 let kind = e.kind();
                 if kind != std::io::ErrorKind::UnexpectedEof && kind != std::io::ErrorKind::ConnectionAborted && kind != std::io::ErrorKind::ConnectionReset {
                     eprintln!("{}", req_lang.log_backend(&e));
@@ -132,7 +162,7 @@ fn accept_loop(listener: TcpListener, gemini: Arc<dyn Gemini>, keys: Arc<KeyStor
     }
 }
 
-fn handle(mut sock: TcpStream, gemini: &dyn Gemini, keys: &KeyStore) -> std::io::Result<()> {
+fn handle(mut sock: TcpStream, gemini: &dyn Gemini, keys: &KeyStore, lang: Lang, open_page: &OpenOnce) -> std::io::Result<()> {
     let _ = sock.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(30)));
     let req = match read_request(&mut sock) {
@@ -142,7 +172,7 @@ fn handle(mut sock: TcpStream, gemini: &dyn Gemini, keys: &KeyStore) -> std::io:
             return Ok(());
         }
     };
-    let response = route(&req, gemini, keys);
+    let response = route(&req, gemini, keys, lang, open_page);
     write_response(&mut sock, response.status, &response.content_type, &response.headers, &response.body)
 }
 
@@ -160,15 +190,22 @@ struct Outgoing {
     body: Vec<u8>,
 }
 
-fn route(req: &Incoming, gemini: &dyn Gemini, keys: &KeyStore) -> Outgoing {
+fn route(req: &Incoming, gemini: &dyn Gemini, keys: &KeyStore, lang: Lang, open_page: &OpenOnce) -> Outgoing {
+    if req.method == "GET" {
+        if req.path == "/" {
+            return html(&page_html(lang));
+        }
+        if let Some(asked) = path_lang(&req.path) {
+            return html(&page_html(asked));
+        }
+    }
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") => html(PAGE),
         ("GET", "/key-status") => json_out(200, &json!({"set": keys.has_key()})),
         ("POST", "/api-key") => save_key(req, keys),
         ("GET", "/status") => json_out(200, &state().status()),
         ("GET", "/selection.png") => selection_png(),
         ("GET", "/result") => result_png(),
-        ("POST", "/selection") => store_selection(&req.body),
+        ("POST", "/selection") => store_selection(&req.body, open_page),
         ("POST", "/generate") => generate(req, gemini),
         ("POST", "/v1/edit") => edit_once(&req.body, gemini),
         _ => text(404, "not found"),
@@ -182,7 +219,7 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 fn app_state() -> &'static Mutex<State> {
     use std::sync::OnceLock;
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(State { selection: None, result: None, generating: false, error: None }))
+    STATE.get_or_init(|| Mutex::new(State { selection: None, result: None, generating: false, error: None, revision: 0 }))
 }
 
 fn html(page: &str) -> Outgoing {
@@ -248,7 +285,7 @@ fn save_key(req: &Incoming, keys: &KeyStore) -> Outgoing {
     }
 }
 
-fn store_selection(body: &[u8]) -> Outgoing {
+fn store_selection(body: &[u8], open_page: &OpenOnce) -> Outgoing {
     let parsed = match parse_selection(body) {
         Ok(s) => s,
         Err(e) => return text(400, &e),
@@ -256,10 +293,15 @@ fn store_selection(body: &[u8]) -> Outgoing {
     let image_size = gemini::image_size_for(parsed.width);
     let width = parsed.width;
     let height = parsed.height;
-    let mut g = state();
-    g.error = None;
-    g.result = None;
-    g.selection = Some(parsed);
+    {
+        let mut g = state();
+        g.error = None;
+        g.result = None;
+        g.revision = g.revision.saturating_add(1);
+        g.selection = Some(parsed);
+    }
+    // The square is visible to other requests before the browser is asked to open.
+    open_page.fire();
     json_out(200, &json!({"ok": true, "width": width, "height": height, "imageSize": image_size}))
 }
 
@@ -323,6 +365,7 @@ fn edit_once(body: &[u8], gemini: &dyn Gemini) -> Outgoing {
         }
         g.generating = true;
         g.error = None;
+        g.revision = g.revision.saturating_add(1);
         g.selection = Some(Selection { png: selection.png.clone(), x: selection.x, y: selection.y, width: selection.width, height: selection.height });
     }
     finish_edit(&selection.png, selection.x, selection.y, selection.width, &prompt, gemini)
@@ -493,7 +536,10 @@ fn write_response(sock: &mut TcpStream, status: u16, content_type: &str, headers
         502 => "Bad Gateway",
         _ => "Error",
     };
-    let mut head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+        body.len()
+    );
     for (name, value) in headers {
         if !value.chars().any(|c| c == '\r' || c == '\n') {
             head.push_str(name);
@@ -508,12 +554,67 @@ fn write_response(sock: &mut TcpStream, status: u16, content_type: &str, headers
     Ok(())
 }
 
-const PAGE: &str = r#"<!DOCTYPE html>
-<html lang="en">
+/// `/ja` and `/zh-Hant` select the prompt page language. Anything else stays a normal path.
+fn path_lang(path: &str) -> Option<Lang> {
+    let code = path.strip_prefix('/').unwrap_or(path);
+    if code.is_empty() || code.contains('/') {
+        return None;
+    }
+    Lang::from_code(code)
+}
+
+fn page_html(lang: Lang) -> String {
+    let text = lang.page();
+    let i18n = json!({
+        "htmlLang": text.html_lang,
+        "title": text.title,
+        "intro": text.intro,
+        "keyBefore": text.key_before,
+        "keyLink": text.key_link,
+        "keyAfter": text.key_after,
+        "apiKey": text.api_key,
+        "saveKey": text.save_key,
+        "empty": text.empty,
+        "promptHint": text.prompt_hint,
+        "hair": text.hair,
+        "skin": text.skin,
+        "send": text.send,
+        "saving": text.saving,
+        "saveFailed": text.save_failed,
+        "saved": text.saved,
+        "unreachable": text.unreachable,
+        "alt": text.alt,
+        "sending": text.sending,
+        "ready": text.ready,
+        "failed": text.failed,
+        "received": text.received,
+        "needKey": text.need_key,
+    });
+    // Keep `<` out of the script so a translation cannot close the script element.
+    let i18n = i18n.to_string().replace('<', "\\u003c");
+    PAGE_TEMPLATE.replace("%%HTML_LANG%%", text.html_lang).replace("%%TITLE%%", &escape_html(text.title)).replace("%%I18N%%", &i18n)
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+const PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
+<html lang="%%HTML_LANG%%">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PhotoCraft retouch</title>
+<title>%%TITLE%%</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 15px/1.45 system-ui, sans-serif; margin: 0; background: #1c1c1c; color: #eee; }
@@ -537,25 +638,43 @@ const PAGE: &str = r#"<!DOCTYPE html>
 </head>
 <body>
 <main>
-  <h1>PhotoCraft retouch</h1>
-  <p>Select a square in PhotoCraft and choose Edit › Generative Retouch. Then describe the change and send it. When this page says the image is ready, choose Edit › Place Generative Result.</p>
+  <h1 id="title"></h1>
+  <p id="intro"></p>
   <div id="keybox" hidden>
-    <p>Paste the API key from <a href="https://aistudio.google.com/apikey">Google AI Studio</a>. It stays on this computer. PhotoCraft never sees it.</p>
+    <p id="keyhelp"></p>
     <div class="row">
-      <input id="apikey" type="password" autocomplete="off" spellcheck="false" placeholder="API key">
-      <button type="button" class="primary" id="savekey">Save key</button>
+      <input id="apikey" type="password" autocomplete="off" spellcheck="false">
+      <button type="button" class="primary" id="savekey"></button>
     </div>
   </div>
-  <div id="preview" class="empty">No selection yet.</div>
-  <textarea id="prompt" placeholder="remove stray hair"></textarea>
+  <div id="preview" class="empty"></div>
+  <textarea id="prompt"></textarea>
   <div class="row">
-    <button type="button" id="hair">Remove stray hair</button>
-    <button type="button" id="skin">Retouch skin</button>
-    <button type="button" class="primary" id="send">Send</button>
+    <button type="button" id="hair"></button>
+    <button type="button" id="skin"></button>
+    <button type="button" class="primary" id="send"></button>
   </div>
   <div id="status"></div>
 </main>
 <script>
+const T = %%I18N%%;
+document.documentElement.lang = T.htmlLang;
+document.title = T.title;
+document.getElementById("title").textContent = T.title;
+document.getElementById("intro").textContent = T.intro;
+const keyhelp = document.getElementById("keyhelp");
+keyhelp.append(T.keyBefore);
+const keylink = document.createElement("a");
+keylink.href = "https://aistudio.google.com/apikey";
+keylink.textContent = T.keyLink;
+keyhelp.append(keylink, T.keyAfter);
+document.getElementById("apikey").placeholder = T.apiKey;
+document.getElementById("savekey").textContent = T.saveKey;
+document.getElementById("preview").textContent = T.empty;
+document.getElementById("prompt").placeholder = T.promptHint;
+document.getElementById("hair").textContent = T.hair;
+document.getElementById("skin").textContent = T.skin;
+document.getElementById("send").textContent = T.send;
 const prompt = document.getElementById("prompt");
 const status = document.getElementById("status");
 const preview = document.getElementById("preview");
@@ -563,68 +682,84 @@ const send = document.getElementById("send");
 const keybox = document.getElementById("keybox");
 const apikey = document.getElementById("apikey");
 let keySet = false;
-document.getElementById("hair").onclick = () => { prompt.value = "remove stray hair"; };
-document.getElementById("skin").onclick = () => { prompt.value = "retouch skin"; };
+let shownRevision = "";
+document.getElementById("hair").onclick = () => { prompt.value = T.hair; };
+document.getElementById("skin").onclick = () => { prompt.value = T.skin; };
 document.getElementById("savekey").onclick = async () => {
-  note("Saving the key…");
+  note(T.saving);
   try {
     const res = await fetch("/api-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: apikey.value }) });
     const msg = await res.json();
-    if (!res.ok) { note(msg.error || "Could not save the key.", "err"); return; }
+    if (!res.ok) { note(msg.error || T.saveFailed, "err"); return; }
     apikey.value = "";
-    note("API key saved on this computer.", "ok");
+    note(T.saved, "ok");
     refresh();
   } catch (e) {
-    note("Could not reach the backend.", "err");
+    note(T.unreachable, "err");
   }
 };
 function note(text, cls) { status.textContent = text; status.className = cls || ""; }
+function fill(template, info) {
+  return template.split("{w}").join(info.width).split("{h}").join(info.height).split("{size}").join(info.imageSize);
+}
+function showSelection(info) {
+  const live = info.state === "waiting" || info.state === "ready" || info.state === "generating" || info.state === "error";
+  if (!live) return;
+  const rev = String(info.revision);
+  const existing = preview.querySelector("img");
+  if (existing && existing.dataset.rev === rev && shownRevision === rev) return;
+  shownRevision = rev;
+  const img = document.createElement("img");
+  img.alt = T.alt;
+  img.dataset.rev = rev;
+  const src = () => "/selection.png?rev=" + encodeURIComponent(rev) + "&t=" + Date.now();
+  img.onerror = () => {
+    const n = Number(img.dataset.tries || "0") + 1;
+    if (n > 4) return;
+    img.dataset.tries = String(n);
+    setTimeout(() => { img.src = src(); }, 200);
+  };
+  img.src = src();
+  preview.className = "";
+  preview.replaceChildren(img);
+}
 async function refresh() {
   let info;
-  try { info = await (await fetch("/status")).json(); }
-  catch (e) { note("Could not reach the backend.", "err"); return; }
+  try { info = await (await fetch("/status", { cache: "no-store" })).json(); }
+  catch (e) { note(T.unreachable, "err"); return; }
   try {
-    const keyInfo = await (await fetch("/key-status")).json();
+    const keyInfo = await (await fetch("/key-status", { cache: "no-store" })).json();
     keySet = !!keyInfo.set;
     keybox.hidden = keySet;
   } catch (e) { /* the prompt page still works; Send will say if the key is missing */ }
-  if (info.state === "waiting" || info.state === "ready" || info.state === "generating" || info.state === "error") {
-    if (!preview.querySelector("img")) {
-      const img = document.createElement("img");
-      img.alt = "Selected square";
-      img.src = "/selection.png?t=" + Date.now();
-      preview.className = "";
-      preview.textContent = "";
-      preview.appendChild(img);
-    }
-  }
-  if (info.state === "generating") note("Sending to Gemini…");
-  else if (info.state === "ready") note("Ready. In PhotoCraft, choose Edit › Place Generative Result.", "ok");
-  else if (info.state === "error") note(info.error || "The retouch failed.", "err");
-  else if (info.state === "waiting") note("Selection received (" + info.width + "×" + info.height + ", output " + info.imageSize + "). Enter a prompt and send.");
-  else if (!keySet) note("Paste your Gemini API key above. It is saved on this computer.");
+  showSelection(info);
+  if (info.state === "generating") note(T.sending);
+  else if (info.state === "ready") note(T.ready, "ok");
+  else if (info.state === "error") note(info.error || T.failed, "err");
+  else if (info.state === "waiting") note(fill(T.received, info));
+  else if (!keySet) note(T.needKey);
   else if (status.className !== "ok") note("");
   send.disabled = !keySet || info.state === "generating" || info.state === "empty";
 }
 send.onclick = async () => {
   send.disabled = true;
-  note("Sending to Gemini…");
+  note(T.sending);
   try {
     const res = await fetch("/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: prompt.value }) });
     const kind = res.headers.get("content-type") || "";
     if (!res.ok) {
       const msg = kind.includes("json") ? (await res.json()).error : await res.text();
-      note(msg || "The retouch failed.", "err");
+      note(msg || T.failed, "err");
     } else {
-      note("Ready. In PhotoCraft, choose Edit › Place Generative Result.", "ok");
+      note(T.ready, "ok");
     }
   } catch (e) {
-    note("Could not reach the backend.", "err");
+    note(T.unreachable, "err");
   }
   refresh();
 };
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 500);
 </script>
 </body>
 </html>
@@ -636,6 +771,12 @@ mod tests {
     use crate::lang::Lang;
     use std::io::{Read, Write};
     use std::sync::Mutex;
+
+    /// `State` is process-global. Tests that read it hold this for their whole body.
+    fn hold_state() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     struct Fake {
         png: Vec<u8>,
@@ -670,23 +811,30 @@ mod tests {
 
     #[test]
     fn prompt_page_sends_and_photo_craft_can_fetch_the_image() {
-        // The process-global state is shared, so this test owns it for the duration.
+        let _hold = hold_state();
         {
             let mut g = state();
             g.selection = None;
             g.result = None;
             g.generating = false;
             g.error = None;
+            g.revision = 0;
         }
         let png = one_pixel();
         let fake = Arc::new(Fake { png: png.clone(), seen: Mutex::new(None) });
         let keys = Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-unused-key"), Some("present".into())));
-        let server = start("127.0.0.1:0".parse().unwrap(), fake.clone(), keys, Lang::En).unwrap();
+        let server = start("127.0.0.1:0".parse().unwrap(), fake.clone(), keys, Lang::En, None).unwrap();
         let addr = server.addr;
 
         let (status, page, _) = exchange(addr, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert_eq!(status, 200, "{page}");
         assert!(page.contains("PhotoCraft retouch"));
+        assert!(page.contains("No selection yet."));
+
+        let (status, ja, _) = exchange(addr, "GET /ja HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200, "{ja}");
+        assert!(ja.contains("まだ選択範囲がありません"), "{ja}");
+        assert!(!ja.contains("No selection yet."), "{ja}");
 
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let body = json!({"png": b64, "x": 4, "y": 6, "width": 1, "height": 1}).to_string();
@@ -719,7 +867,15 @@ mod tests {
         assert_eq!(status, 200, "{head}");
         let status_json: Value = serde_json::from_slice(&status_body).unwrap();
         assert_eq!(status_json["state"], "ready");
-        assert!(PAGE.contains(r#"send.disabled = !keySet || info.state === "generating" || info.state === "empty""#));
+        assert_eq!(status_json["revision"].as_u64(), Some(1));
+        let page_src = page_html(Lang::En);
+        assert!(page_src.contains(r#"send.disabled = !keySet || info.state === "generating" || info.state === "empty""#));
+        assert!(page_src.contains("info.revision"));
+        assert!(page_src.contains(r#"cache: "no-store""#));
+        assert!(head.to_ascii_lowercase().contains("cache-control: no-store"));
+        assert_eq!(path_lang("/ja"), Some(Lang::Ja));
+        assert_eq!(path_lang("/zh-Hant"), Some(Lang::ZhHant));
+        assert_eq!(path_lang("/status"), None);
 
         let prompt_body = r#"{"prompt":"retouch skin"}"#;
         let posted = format!(
@@ -753,7 +909,7 @@ mod tests {
         let path = dir.join("gemini-api-key.txt");
         let keys = Arc::new(crate::key::KeyStore::open(path.clone(), Some(String::new())));
         let fake = Arc::new(Fake { png: Vec::new(), seen: Mutex::new(None) });
-        let server = start("127.0.0.1:0".parse().unwrap(), fake, Arc::clone(&keys), Lang::En).unwrap();
+        let server = start("127.0.0.1:0".parse().unwrap(), fake, Arc::clone(&keys), Lang::En, None).unwrap();
 
         let (status, page, _) = exchange(server.addr, "GET /key-status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert_eq!(status, 200, "{page}");
@@ -781,5 +937,62 @@ mod tests {
         let (status, _, _) = exchange(server.addr, &posted);
         assert_eq!(status, 400);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_selection_opens_the_page_once_and_a_bad_body_does_not() {
+        let _hold = hold_state();
+        {
+            let mut g = state();
+            g.selection = None;
+            g.result = None;
+            g.generating = false;
+            g.error = None;
+            g.revision = 0;
+        }
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&opened);
+        let hook: FirstSelectionHook = Arc::new(move |url| {
+            record.lock().unwrap_or_else(PoisonError::into_inner).push(url);
+        });
+        let fake = Arc::new(Fake { png: one_pixel(), seen: Mutex::new(None) });
+        let keys = Arc::new(crate::key::KeyStore::open(std::env::temp_dir().join("photocraft-retouch-open-once"), Some("present".into())));
+        let server = start("127.0.0.1:0".parse().unwrap(), fake, keys, Lang::En, Some(hook)).unwrap();
+        let addr = server.addr;
+
+        let posted = "POST /selection HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{";
+        let (status, _, _) = exchange(addr, posted);
+        assert_eq!(status, 400);
+        assert!(opened.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+
+        let (status, _, before) = exchange(addr, "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200);
+        let before: Value = serde_json::from_slice(&before).unwrap();
+        let revision = before["revision"].as_u64().unwrap();
+
+        let png = one_pixel();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let body = json!({"png": b64, "x": 1, "y": 2, "width": 1, "height": 1}).to_string();
+        let posted = format!(
+            "POST /selection HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        {
+            let urls = opened.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(urls.len(), 1, "{urls:?}");
+            assert!(urls[0].ends_with(&format!(":{}/en", addr.port())), "{}", urls[0]);
+        }
+
+        let (status, head, _) = exchange(addr, &posted);
+        assert_eq!(status, 200, "{head}");
+        assert_eq!(opened.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
+
+        let (status, _, after) = exchange(addr, "GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert_eq!(status, 200);
+        let after: Value = serde_json::from_slice(&after).unwrap();
+        assert_eq!(after["state"], "waiting");
+        assert_eq!(after["revision"].as_u64().unwrap(), revision + 2);
     }
 }

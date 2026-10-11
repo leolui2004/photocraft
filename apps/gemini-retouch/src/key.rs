@@ -1,5 +1,6 @@
-//! The Gemini API key. It stays in this process: an environment variable, a `.env` file, or a
-//! file written when the user pastes the key into the browser page. PhotoCraft never sees it.
+//! The Gemini API key. It stays in this process. A shipped exe only reads the file written when
+//! the user pastes the key into the browser page. Debug builds may pass a developer preset
+//! (environment or `.env`), which wins over that file. PhotoCraft never sees the key.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
-    /// `preset` is the key from the environment or `.env` (it wins over the saved file).
+    /// `preset` is a developer key (it wins over the saved file). A shipped exe passes `None`.
     pub fn load(preset: Option<String>) -> Self {
         let path = key_path();
         let key = match preset.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {

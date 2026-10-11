@@ -382,6 +382,14 @@ pub fn bytes(b: &[u8]) -> OpenSource {
     OpenSource::Bytes(Arc::new(b.to_vec()))
 }
 
+/// Status after the prompt page opens. `{menu}` and `{command}` are the translated Edit menu names.
+pub fn retouch_prompt_status(page: &str) -> String {
+    crate::i18n::fmt(
+        tl!("Enter the retouch prompt at {page}, then {menu} › {command}"),
+        &[("page", page), ("menu", tl!("Edit")), ("command", tl!("Place Generative Result"))],
+    )
+}
+
 #[cfg(test)]
 #[path = "jobs_ui_tests.rs"]
 mod tests;
