@@ -1,9 +1,7 @@
 name: CI
 
+# Automatic runs are off on this fork (push, pull request, and schedule).
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
     inputs:
       fuzz:

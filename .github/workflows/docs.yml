@@ -1,21 +1,7 @@
 name: Documentation
 
+# Automatic runs are off on this fork (push, pull request, and schedule).
 on:
-  push:
-    branches: [main]
-    paths:
-      - "book/**"
-      - "docs/**"
-      - "README.md"
-      - "SECURITY.md"
-      - ".github/workflows/docs.yml"
-  pull_request:
-    paths:
-      - "book/**"
-      - "docs/**"
-      - "README.md"
-      - "SECURITY.md"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:

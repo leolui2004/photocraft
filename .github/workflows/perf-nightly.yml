@@ -9,9 +9,8 @@ name: Perf (nightly)
 # To give this runner class its own baseline: run it by hand with "update_baseline", download
 # the `perf-baseline` artifact and commit it as perf/baseline.json in a PR.
 
+# Automatic runs are off on this fork (push, pull request, and the nightly schedule).
 on:
-  schedule:
-    - cron: "23 3 * * *"
   workflow_dispatch:
     inputs:
       quick:

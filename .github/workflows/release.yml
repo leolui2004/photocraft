@@ -6,9 +6,8 @@
 # warning, never a failed build.
 name: Release
 
+# Automatic runs are off on this fork (including pushes to the release branch).
 on:
-  push:
-    branches: [release]
   workflow_dispatch:
     inputs:
       version:
