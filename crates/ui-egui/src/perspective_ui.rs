@@ -104,11 +104,15 @@ impl PerspSession {
     }
 
     fn set_corner(&mut self, group: &[(usize, usize)], p: [f64; 2]) {
+        let layout = self.mode == PerspMode::Layout;
         for &(pi, ci) in group {
-            if self.mode == PerspMode::Layout {
-                self.planes[pi].src[ci] = p;
+            let Some(pl) = self.planes.get_mut(pi) else { continue };
+            if layout && let Some(c) = pl.src.get_mut(ci) {
+                *c = p;
             }
-            self.planes[pi].dst[ci] = p;
+            if let Some(c) = pl.dst.get_mut(ci) {
+                *c = p;
+            }
         }
     }
 }
@@ -180,6 +184,8 @@ pub fn control(app: &mut PhotocraftApp, ui: &Value) -> Result<Value, String> {
     }
     if let Some(p) = ui.get("planes") {
         s.planes = serde_json::from_value(p.clone()).map_err(|e| format!("bad planes: {e}"))?;
+        // A corner drag holds (plane, corner) indices into the old list (#952).
+        s.drag = None;
         s.update_grid();
     }
     if let Some(st) = ui.get("straighten").and_then(Value::as_str) {
@@ -249,7 +255,9 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, _mods: egui::Modifiers) {
     }
 }
 
-pub fn draw(s: &PerspSession, painter: &egui::Painter, xf: &ViewXform) {
+/// The warped pixels: image content, drawn under the grid and guides like the document so a
+/// guide stays visible across the layer being warped (#7781). The planes and pins are [`draw`].
+pub fn draw_content(s: &PerspSession, painter: &egui::Painter, xf: &ViewXform) {
     let scr = |p: [f64; 2]| xf.to_screen(p[0] as f32, p[1] as f32);
     let mut mesh = egui::Mesh::with_texture(s.texture.id());
     let tint = Color32::from_white_alpha((s.opacity.clamp(0.0, 1.0) * 255.0) as u8);
@@ -267,6 +275,11 @@ pub fn draw(s: &PerspSession, painter: &egui::Painter, xf: &ViewXform) {
         }
     }
     painter.add(mesh);
+}
+
+/// The planes, their grids and pins over the warped pixels ([`draw_content`]) and the guides.
+pub fn draw(s: &PerspSession, painter: &egui::Painter, xf: &ViewXform) {
+    let scr = |p: [f64; 2]| xf.to_screen(p[0] as f32, p[1] as f32);
     let accent = crate::theme::Tokens::get(painter.ctx()).accent;
     let warp = s.mode == PerspMode::Warp;
     for p in &s.planes {
@@ -312,7 +325,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         }
     } else {
-        ui.label(format!("{} plane(s)", s.planes.len()));
+        ui.label(crate::i18n::trn(crate::i18n::current(), s.planes.len() as u64, "{n} plane", "{n} planes"));
         if ui.button(tl!("Remove Planes")).clicked() {
             s.planes.clear();
             s.update_grid();
@@ -375,5 +388,40 @@ mod tests {
         let before = app.session.active().unwrap().history.past_len();
         commit(&mut app);
         assert_eq!(app.session.active().unwrap().history.past_len(), before + 1);
+    }
+
+    #[test]
+    fn replacing_the_planes_mid_corner_drag_ends_the_drag() {
+        // #952: the drag kept (plane, corner) indices into the old list, so the next move or
+        // release indexed the new, shorter one and panicked.
+        for release in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+            app.session.execute("file.new", json!({"width": 100, "height": 80, "depth": 8})).unwrap();
+            app.session.execute("layer.new.layer", json!({})).unwrap();
+            app.session
+                .edit("paint", |doc, active| {
+                    doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(20, 30, 80, 50), &[1.0, 0.0, 0.0, 1.0]);
+                    Ok(())
+                })
+                .unwrap();
+            app.sync_views();
+            crate::distort_ui::menu(&mut app, &ctx, "edit.perspectiveWarp", &json!({})).unwrap().unwrap();
+            let ev = |app: &mut PhotocraftApp, e| crate::distort_ui::pointer(app, e, egui::Modifiers::NONE);
+            ev(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 });
+            ev(&mut app, ToolEvent::Move { x: 90.0, y: 70.0, pressure: 1.0 });
+            ev(&mut app, ToolEvent::Up { x: 90.0, y: 70.0 });
+            // Press a corner, then replace the planes while it's held.
+            ev(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 });
+            assert!(matches!(app.distort.perspective.as_ref().unwrap().drag, Some(Drag::Corner { .. })));
+            control(&mut app, &json!({"planes": []})).unwrap();
+            if release {
+                ev(&mut app, ToolEvent::Up { x: 30.0, y: 30.0 });
+            } else {
+                ev(&mut app, ToolEvent::Move { x: 30.0, y: 30.0, pressure: 1.0 });
+            }
+            let s = app.distort.perspective.as_ref().unwrap();
+            assert!(s.planes.is_empty() && s.drag.is_none(), "release {release}");
+        }
     }
 }

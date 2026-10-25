@@ -50,7 +50,7 @@ fn has_layer_for_slice(s: &Session) -> std::result::Result<(), String> {
     if matches!(l.content, LayerContent::Adjustment(_)) {
         return Err("adjustment layers have no bounds to slice".into());
     }
-    if d.doc.layers.first().is_some_and(|b| b.id == id && b.name == "Background" && b.locks.transparency && b.locks.position) {
+    if d.doc.is_background(id) {
         return Err("the Background layer can't have a layer-based slice".into());
     }
     if d.doc.slices.list.iter().any(|s| s.layer == Some(id)) {
@@ -88,7 +88,7 @@ fn layer_slice_rect(doc: &Document, s: &Slice) -> Option<Rect> {
     let l = doc.layer(s.layer?)?;
     let b = layer_bounds(l);
     let [t, le, bo, r] = s.outsets;
-    Some(if b.is_empty() { b } else { Rect::new(b.x0 - le, b.y0 - t, b.x1 + r, b.y1 + bo) })
+    Some(if b.is_empty() { b } else { Rect::new(b.x0.saturating_sub(le), b.y0.saturating_sub(t), b.x1.saturating_add(r), b.y1.saturating_add(bo)) })
 }
 
 /// Re-fits layer-based slices of the active document to their layers; drops slices whose layer
@@ -243,7 +243,8 @@ pub fn resolved_json(doc: &Document, r: &ResolvedSlice) -> Value {
         "number": r.number,
         "id": r.id,
         "origin": r.origin.id(),
-        "name": r.name,
+        // A covered slice's later pieces show as `<name>-NN`; the slice itself keeps its name.
+        "name": s.map(|s| s.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(&r.name),
         "rect": [r.rect.x0, r.rect.y0, r.rect.width(), r.rect.height()],
         "kind": r.kind.id(),
         "layer": s.and_then(|s| s.layer).map(|l| l.0),
@@ -254,6 +255,30 @@ pub fn resolved_json(doc: &Document, r: &ResolvedSlice) -> Value {
         "cellText": s.map_or("", |s| s.cell_text.as_str()),
         "background": s.and_then(|s| s.background).map(|c| format!("#{:02x}{:02x}{:02x}", c[1], c[2], c[3])),
     })
+}
+
+/// A stored slice as `slice.list` and `slice.set` report it: once, with its own (canvas-clipped)
+/// rectangle, the one `slice.set` takes back, and the visible `pieces` a later slice cuts it into,
+/// which are numbered and exported separately (#7770). `number` is its first piece's, `null` when
+/// later slices cover it wholly. `None` for an unknown id.
+fn stored_json(doc: &Document, id: u32, resolved: &[ResolvedSlice]) -> Option<Value> {
+    let sl = doc.slices.get(id)?;
+    let pieces: Vec<&ResolvedSlice> = resolved.iter().filter(|r| r.id == Some(id)).collect();
+    let first = pieces.first();
+    let whole = ResolvedSlice {
+        number: first.map_or(0, |r| r.number),
+        id: Some(id),
+        origin: sl.origin,
+        rect: sl.rect.intersect(&doc.bounds()),
+        name: first.map_or_else(|| sl.name.clone(), |r| r.name.clone()),
+        kind: sl.kind,
+    };
+    let mut v = resolved_json(doc, &whole);
+    if first.is_none() {
+        v["number"] = Value::Null;
+    }
+    v["pieces"] = pieces.iter().map(|r| json!({"number": r.number, "name": r.name, "rect": [r.rect.x0, r.rect.y0, r.rect.width(), r.rect.height()]})).collect();
+    Some(v)
 }
 
 // ---------- commands ----------
@@ -283,8 +308,8 @@ fn from_guides(s: &mut Session) -> Result<Value> {
     let b = d.doc.bounds();
     let mut xs: Vec<i32> = vec![b.x0, b.x1];
     let mut ys: Vec<i32> = vec![b.y0, b.y1];
-    xs.extend(d.doc.guides.vertical.iter().map(|g| (*g as f64).round() as i32).filter(|x| *x > b.x0 && *x < b.x1));
-    ys.extend(d.doc.guides.horizontal.iter().map(|g| (*g as f64).round() as i32).filter(|y| *y > b.y0 && *y < b.y1));
+    xs.extend(d.doc.guides.vertical.iter().map(|g| g.round() as i32).filter(|x| *x > b.x0 && *x < b.x1));
+    ys.extend(d.doc.guides.horizontal.iter().map(|g| g.round() as i32).filter(|y| *y > b.y0 && *y < b.y1));
     if xs.len() == 2 && ys.len() == 2 {
         return Err(EngineError::Other("the document has no guides inside the canvas".into()));
     }
@@ -321,16 +346,16 @@ fn set_slice(s: &mut Session, p: &Value) -> Result<Value> {
     // nothing is committed unless every option is valid and the slice stays on the canvas.
     let id = s.edit("Slice Options", |doc, _| {
         let id = store(doc, t)?;
+        let canvas = doc.bounds();
         let sl = doc.slices.get_mut(id).ok_or_else(|| bad(cmd, "slice vanished"))?;
         apply_options(sl, p, cmd)?;
-        if !slices::resolve(doc).iter().any(|r| r.id == Some(id)) {
+        if sl.rect.intersect(&canvas).is_empty() {
             return Err(bad(cmd, "slice is off the canvas"));
         }
         Ok(id)
     })?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let r = slices::resolve(&d.doc).into_iter().find(|r| r.id == Some(id)).ok_or_else(|| bad(cmd, "slice is off the canvas"))?;
-    Ok(resolved_json(&d.doc, &r))
+    stored_json(&d.doc, id, &slices::resolve(&d.doc)).ok_or_else(|| bad(cmd, "slice vanished"))
 }
 
 fn promote(s: &mut Session, p: &Value) -> Result<Value> {
@@ -378,6 +403,11 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"deleted": n}))
 }
 
+/// The most parts one Divide Slice makes. Resolving the slice list is quadratic in the slice count
+/// (`slices::resolve`), so a 1000 x 1000 division, a million slices, left every later list or
+/// export with ~5e11 steps of work (#1020).
+const MAX_DIVIDE_PARTS: i32 = 10_000;
+
 fn divide(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "slice.divide";
     let t = find(s, p, cmd)?;
@@ -386,11 +416,14 @@ fn divide(s: &mut Session, p: &Value) -> Result<Value> {
     if down == 1 && across == 1 {
         return Err(bad(cmd, "give \"horizontal\" (slices down) and/or \"vertical\" (slices across) > 1"));
     }
+    if down * across > MAX_DIVIDE_PARTS {
+        return Err(bad(cmd, format!("{down} x {across} = {} parts is more than one division makes ({MAX_DIVIDE_PARTS})", down * across)));
+    }
     let r = match t {
         Target::Auto(r) => r,
         Target::Stored(id) => s.active().and_then(|d| d.doc.slices.get(id)).map(|sl| sl.rect).ok_or_else(|| bad(cmd, "no such slice"))?,
     };
-    if (r.width() as i32) < across || (r.height() as i32) < down {
+    if r.width() < across as u32 || r.height() < down as u32 {
         return Err(bad(cmd, "the slice is too small to divide that many times"));
     }
     let n = (down * across) as usize;
@@ -405,10 +438,11 @@ fn divide(s: &mut Session, p: &Value) -> Result<Value> {
         let mut next_id = doc.slices.next_id();
         for j in 0..down {
             for i in 0..across {
-                let x0 = r.x0 + (r.width() as i32 * i) / across;
-                let x1 = r.x0 + (r.width() as i32 * (i + 1)) / across;
-                let y0 = r.y0 + (r.height() as i32 * j) / down;
-                let y1 = r.y0 + (r.height() as i32 * (j + 1)) / down;
+                // Products can exceed i32 even when every interpolated edge fits the rect.
+                let x = |k: i32| (i64::from(r.x0) + i64::from(r.width()) * i64::from(k) / i64::from(across)) as i32;
+                let y = |k: i32| (i64::from(r.y0) + i64::from(r.height()) * i64::from(k) / i64::from(down)) as i32;
+                let (x0, x1) = (x(i), x(i + 1));
+                let (y0, y1) = (y(j), y(j + 1));
                 let nid = if ids.is_empty() {
                     id
                 } else {
@@ -435,7 +469,22 @@ fn divide(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn list(s: &mut Session) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let all: Vec<Value> = slices::resolve(&d.doc).iter().map(|r| resolved_json(&d.doc, r)).collect();
+    // One entry per slice, in reading order of its first piece: auto slices as they resolve, a
+    // stored slice once with its pieces; slices wholly covered by later ones follow.
+    let resolved = slices::resolve(&d.doc);
+    let mut listed = std::collections::HashSet::new();
+    let mut all: Vec<Value> = Vec::new();
+    for r in &resolved {
+        match r.id {
+            None => all.push(resolved_json(&d.doc, r)),
+            Some(id) if listed.insert(id) => all.extend(stored_json(&d.doc, id, &resolved)),
+            Some(_) => {}
+        }
+    }
+    let canvas = d.doc.bounds();
+    for sl in d.doc.slices.list.iter().filter(|sl| !listed.contains(&sl.id) && !sl.rect.intersect(&canvas).is_empty()) {
+        all.extend(stored_json(&d.doc, sl.id, &resolved));
+    }
     Ok(json!({"slices": all, "locked": s.file_menu.slices_locked}))
 }
 
@@ -516,7 +565,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "slice.divide",
             "Divide Slice…",
             &[],
-            r##"{"slice":id | "number":n,"horizontal":n=1 (slices down),"vertical":n=1 (slices across)} → {slices}"##,
+            r##"{"slice":id | "number":n,"horizontal":n=1 (slices down),"vertical":n=1 (slices across); at most 10000 parts} → {slices}"##,
             unlocked,
             divide
         ),
@@ -525,7 +574,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "List Slices",
             menu: &[],
             shortcut: None,
-            params: "{} → {slices:[{number,id,origin:auto|layer|user,name,rect:[x,y,w,h],kind,layer,url,alt,…}], locked}",
+            params: "{} → {slices:[{number,id,origin:auto|layer|user,name,rect:[x,y,w,h],kind,layer,url,alt,…,pieces?:[{number,name,rect}] (a stored slice's visible parts; number null when wholly covered)}], locked}",
             enabled: has_doc,
             journal: false,
             run: |s, _| list(s),
