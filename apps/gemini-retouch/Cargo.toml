@@ -18,5 +18,5 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
